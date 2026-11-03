@@ -92,7 +92,7 @@ public:
     //! Kinematic constraints
     Vector<double> max_velocity, max_acceleration, max_jerk;
 
-    //! Positional constraints (only in Ruckig Pro)
+    //! Positional bounds, checked over the complete calculated trajectory
     Vector<double> max_position, min_position;
 
     //! Minimum velocity / acceleration limit. If none is given, the negative maximum limit is used.
@@ -186,6 +186,15 @@ public:
         }
 
         for (size_t dof = 0; dof < degrees_of_freedom; ++dof) {
+            if (std::isnan(min_position[dof]) || std::isnan(max_position[dof])
+                || min_position[dof] > max_position[dof]
+                || min_position[dof] == std::numeric_limits<double>::infinity()
+                || max_position[dof] == -std::numeric_limits<double>::infinity()) {
+                if constexpr (throw_validation_error) {
+                    throw RuckigError("invalid position bounds of DoF " + std::to_string(dof) + ".");
+                }
+                return false;
+            }
             const double jMax = max_jerk[dof];
             if (std::isnan(jMax) || jMax < 0.0) {
                 if constexpr (throw_validation_error) {

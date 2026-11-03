@@ -425,6 +425,16 @@ public:
             ext.t_max = t_sum;
         }
 
+        const double p_end = std::get<0>(integrate(t, p, v, a, j));
+        if (p_end < ext.min) {
+            ext.min = p_end;
+            ext.t_min = t_sum + t;
+        }
+        if (p_end > ext.max) {
+            ext.max = p_end;
+            ext.t_max = t_sum + t;
+        }
+
         if (j != 0) {
             const double D = a * a - 2 * j * v;
             if (std::abs(D) < std::numeric_limits<double>::epsilon()) {
@@ -435,10 +445,16 @@ public:
                 check_position_extremum((-a - D_sqrt) / j, t_sum, t, p, v, a, j, ext);
                 check_position_extremum((-a + D_sqrt) / j, t_sum, t, p, v, a, j, ext);
             }
+        } else if (a != 0.0) {
+            check_position_extremum(-v / a, t_sum, t, p, v, a, j, ext);
         }
     }
 
     Bound get_position_extrema() const {
+        // Disabled and stationary DoFs only initialize the terminal state.
+        if (t_sum.back() == 0.0 && brake.duration == 0.0) {
+            return Bound{p.back(), p.back(), 0.0, 0.0};
+        }
         Bound extrema;
         extrema.min = std::numeric_limits<double>::infinity();
         extrema.max = -std::numeric_limits<double>::infinity();
@@ -461,12 +477,12 @@ public:
             check_step_for_position_extremum(t_current_sum + brake.duration, t[i], p[i], v[i], a[i], j[i], extrema);
         }
 
-        if (pf < extrema.min) {
-            extrema.min = pf;
+        if (p.back() < extrema.min) {
+            extrema.min = p.back();
             extrema.t_min = t_sum.back() + brake.duration;
         }
-        if (pf > extrema.max) {
-            extrema.max = pf;
+        if (p.back() > extrema.max) {
+            extrema.max = p.back();
             extrema.t_max = t_sum.back() + brake.duration;
         }
 

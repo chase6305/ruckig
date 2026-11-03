@@ -66,6 +66,7 @@ mod ffi {
         fn ruckig_new_offline(dofs: usize, waypoints: usize) -> UniquePtr<Ruckig>;
         fn ruckig_new(dofs: usize, delta_time: f64, waypoints: usize) -> UniquePtr<Ruckig>;
         fn ruckig_update(ruckig: Pin<&mut Ruckig>, input: &InputParameter, output: Pin<&mut OutputParameter>) -> i32;
+        fn ruckig_update_trajectory(ruckig: Pin<&mut Ruckig>, trajectory: &Trajectory, output: Pin<&mut OutputParameter>) -> i32;
         fn ruckig_calculate(ruckig: Pin<&mut Ruckig>, input: &InputParameter, trajectory: Pin<&mut Trajectory>) -> i32;
         fn ruckig_reset(ruckig: Pin<&mut Ruckig>);
     }
@@ -355,6 +356,14 @@ impl Ruckig {
     pub fn calculate(&mut self, input: &mut InputParameter, trajectory: &mut Trajectory) -> Result {
         input.apply();
         let raw = ffi::ruckig_calculate(self.0.pin_mut(), &input.inner, trajectory.0.pin_mut());
+        Result::from(raw)
+    }
+
+    pub fn update_trajectory(&mut self, trajectory: &Trajectory, output: &mut OutputParameter) -> Result {
+        let raw = ffi::ruckig_update_trajectory(self.0.pin_mut(), &trajectory.0, output.inner.pin_mut());
+        if raw >= 0 {
+            output.sync();
+        }
         Result::from(raw)
     }
 }

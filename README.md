@@ -143,8 +143,8 @@ Vector max_velocity;
 Vector max_acceleration;
 Vector max_jerk; // Initialized to infinity
 
-Vector max_position; // Initialized to infinity (only in Pro Version)
-Vector min_position; // Initialized to -infinity (only in Pro Version)
+Vector max_position; // Initialized to infinity; checked over the calculated trajectory
+Vector min_position; // Initialized to -infinity; checked over the calculated trajectory
 
 std::optional<Vector> min_velocity; // If not given, the negative maximum velocity will be used.
 std::optional<Vector> min_acceleration; // If not given, the negative maximum acceleration will be used.
@@ -242,12 +242,24 @@ result = ruckig.calculate(input, trajectory);
 ```
 When only using this method, the `Ruckig` constructor does not need a control cycle (`delta_time`) as an argument. However if given, Ruckig supports stepping through the trajectory with
 ```.cpp
-while (ruckig.update(trajectory, output) == Result::Working) {
-  // Make use of the new state here!
-  // e.g. robot->setJointPositions(output.new_position);
-}
+Result step_result;
+do {
+  step_result = ruckig.update(trajectory, output);
+  if (step_result < 0) {
+    break; // Handle the error before using the output.
+  }
+  // Use output.new_position, including the terminal state on Finished.
+} while (step_result == Result::Working);
 ```
-starting from the current `output.time` (currently Ruckig Pro only).
+starting from the current `output.time`. Use a positive, finite control cycle for stepping. Each call advances by one cycle and clamps to the terminal state, returning `Finished` on reaching the duration. Repeated calls then keep the terminal state, including its velocity and acceleration, without extrapolating past the end. The output includes the supplied trajectory, and `new_calculation` stays false. C++ and Python use `update(trajectory, output)`; Rust uses `update_trajectory(&trajectory, &mut output)`.
+
+### Local Position Bounds
+
+The Community version checks `min_position` and `max_position` locally after calculating a trajectory. The check uses analytical position extrema over the complete interval `[0, duration]`, including braking, constant-acceleration segments, and unsynchronized or disabled axes that continue moving until the overall duration. It applies to both position and velocity control, with an absolute tolerance of `1e-8` in position units.
+
+If the calculated motion crosses a bound, `calculate` or online `update` returns `Result::ErrorPositionalLimits`. Online update emits no new state for the rejected motion; it retries planning on the next call. A rejected trajectory cannot be used with offline `update`. Both online and offline stepping stop at the terminal time so a final nonzero velocity cannot cause an extra control-cycle extrapolation.
+
+This is a feasibility check of the generated motion: it does not search for a different, slower trajectory that avoids an overshoot. Callers must handle a negative result before using the output. Position bounds default to infinity, so existing unconstrained inputs retain their motion profiles. Per-section position bounds, local multi-waypoint optimization, predictive tracking, speed control, and interruptible optimization remain outside this implementation. This fork implements the local features using the existing MIT-licensed solver and analytical integration; it contains no Ruckig Pro source code.
 
 
 ### Tracking Interface

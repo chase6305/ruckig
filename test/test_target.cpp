@@ -369,6 +369,171 @@ TEST_CASE("batch-sampling") {
     CHECK_THROWS_AS(trajectory.at_times(times, p, v, a), RuckigError);
 }
 
+TEST_CASE("local-position-limits") {
+    Ruckig<1> otg(0.01);
+    InputParameter<1> input;
+    Trajectory<1> trajectory;
+    OutputParameter<1> output;
+    input.current_position = {0.0};
+    input.target_position = {1.0};
+    input.max_velocity = input.max_acceleration = input.max_jerk = {1.0};
+    input.min_position = {0.0};
+    input.max_position = {1.0};
+    REQUIRE(otg.calculate(input, trajectory) == Result::Working);
+
+    // Reject an out-of-bounds target without emitting a new command.
+    input.max_position = {0.5};
+    output.new_position = {42.0};
+    CHECK(otg.update(input, output) == Result::ErrorPositionalLimits);
+    CHECK(output.time == 0.0);
+    CHECK(output.new_position[0] == 42.0);
+    CHECK(otg.update(output.trajectory, output) == Result::ErrorInvalidInput);
+    input.max_position = {1.0};
+    CHECK(otg.update(input, output) == Result::Working);
+
+    // Both endpoints are in range, but the initial velocity requires overshoot.
+    input.min_position = {-10.0};
+    input.max_position = {0.2};
+    input.target_position = {-1.0};
+    input.current_velocity = {1.0};
+    CHECK(otg.calculate(input, trajectory) == Result::ErrorPositionalLimits);
+    input.max_jerk = {std::numeric_limits<double>::infinity()};
+    CHECK(otg.calculate(input, trajectory) == Result::ErrorPositionalLimits);
+    std::array<Bound, 1> extrema;
+    trajectory.get_position_extrema(extrema);
+    CHECK(extrema[0].max == doctest::Approx(0.5));
+    CHECK(extrema[0].t_max == doctest::Approx(1.0));
+
+    // Braking starts outside the velocity limit and must also respect position bounds.
+    input.current_velocity = {2.0};
+    input.max_jerk = {1.0};
+    CHECK(otg.calculate(input, trajectory) == Result::ErrorPositionalLimits);
+
+    input.current_velocity = {-2.0};
+    input.target_position = {1.0};
+    input.min_position = {-0.2};
+    input.max_position = {10.0};
+    CHECK(otg.calculate(input, trajectory) == Result::ErrorPositionalLimits);
+
+    input.max_position = {std::nan("")};
+    CHECK_FALSE(input.validate<false>());
+    CHECK_THROWS_AS(input.validate(), RuckigError);
+    input.max_position = {-20.0};
+    CHECK_FALSE(input.validate<false>());
+
+    // Velocity control also has an absolute position along the generated motion.
+    input.control_interface = ControlInterface::Velocity;
+    input.min_position = {-10.0};
+    input.current_velocity = {1.0};
+    input.target_velocity = {0.0};
+    input.max_position = {0.25};
+    CHECK(otg.calculate(input, trajectory) == Result::ErrorPositionalLimits);
+    input.max_position = {2.0};
+    CHECK(otg.calculate(input, trajectory) == Result::Working);
+
+    // A disabled axis can continue moving while the other axis reaches its target.
+    Ruckig<2> multi(0.01);
+    InputParameter<2> multi_input;
+    Trajectory<2> multi_trajectory;
+    multi_input.current_position = {0.0, 0.0};
+    multi_input.target_position = {0.0, 10.0};
+    multi_input.current_velocity = {1.0, 0.0};
+    multi_input.max_velocity = multi_input.max_acceleration = multi_input.max_jerk = {1.0, 1.0};
+    multi_input.enabled = {false, true};
+    multi_input.max_position = {1.0, 10.0};
+    CHECK(multi.calculate(multi_input, multi_trajectory) == Result::ErrorPositionalLimits);
+    multi_input.max_position = {20.0, 10.0};
+    CHECK(multi.calculate(multi_input, multi_trajectory) == Result::Working);
+    multi_input.enabled[0] = true;
+    multi_input.per_dof_synchronization = {Synchronization::None, Synchronization::Time};
+    multi_input.target_velocity[0] = 1.0;
+    multi_input.max_position[0] = 1.0;
+    CHECK(multi.calculate(multi_input, multi_trajectory) == Result::ErrorPositionalLimits);
+
+    // Disabled single-axis profiles must have a valid terminal state as well.
+    input.control_interface = ControlInterface::Position;
+    input.enabled[0] = false;
+    input.current_position = {0.5};
+    input.max_position = {2.0};
+    REQUIRE(otg.calculate(input, trajectory) == Result::Working);
+    CHECK(otg.update(trajectory, output) == Result::Finished);
+    CHECK(output.new_position[0] == 0.5);
+}
+
+TEST_CASE("offline-trajectory-execution") {
+    Ruckig<1> otg(0.3);
+    InputParameter<1> input;
+    Trajectory<1> trajectory;
+    OutputParameter<1> output;
+    input.current_position = {0.0};
+    input.target_position = {1.0};
+    input.target_velocity = {0.5};
+    input.max_velocity = input.max_acceleration = input.max_jerk = {1.0};
+    CHECK(otg.update(trajectory, output) == Result::ErrorInvalidInput);
+    REQUIRE(otg.calculate(input, trajectory) == Result::Working);
+    output.time = 0.4;
+    Result result = Result::Working;
+    for (size_t i = 0; result == Result::Working && i < 100; ++i) {
+        result = otg.update(trajectory, output);
+        double p = 0.0, v = 0.0, a = 0.0;
+        trajectory.at_time(output.time, p, v, a);
+        CHECK(output.new_position[0] == p);
+        CHECK(output.new_velocity[0] == v);
+        CHECK(output.new_acceleration[0] == a);
+        CHECK_FALSE(output.new_calculation);
+    }
+    REQUIRE(result == Result::Finished);
+    CHECK(output.time == trajectory.get_duration());
+    CHECK(output.new_position[0] == doctest::Approx(1.0));
+    CHECK(output.new_velocity[0] == doctest::Approx(0.5));
+    CHECK(otg.update(output.trajectory, output) == Result::Finished);
+    CHECK(output.new_position[0] == doctest::Approx(1.0));
+
+    for (double bad_cycle: {0.0, -1.0, std::nan(""), std::numeric_limits<double>::infinity()}) {
+        otg.delta_time = bad_cycle;
+        CHECK(otg.update(trajectory, output) == Result::ErrorInvalidInput);
+        CHECK(otg.update(input, output) == Result::ErrorInvalidInput);
+    }
+    otg.delta_time = 0.1;
+    output.time = -1.0;
+    CHECK(otg.update(trajectory, output) == Result::ErrorInvalidInput);
+    CHECK(otg.update(input, output) == Result::ErrorInvalidInput);
+    output.time = std::nan("");
+    CHECK(otg.update(trajectory, output) == Result::ErrorInvalidInput);
+    CHECK(otg.update(input, output) == Result::ErrorInvalidInput);
+    output.time = 0.0;
+    Ruckig<> dynamic(2, 0.1);
+    OutputParameter<> wrong_output(1);
+    Trajectory<> wrong_trajectory(1);
+    CHECK(dynamic.update(wrong_trajectory, wrong_output) == Result::ErrorInvalidInput);
+    Ruckig<> dynamic_single(1, 0.1);
+    InputParameter<> dynamic_input(1);
+    dynamic_input.current_position = {0.0};
+    dynamic_input.target_position = {1.0};
+    dynamic_input.max_velocity = dynamic_input.max_acceleration = dynamic_input.max_jerk = {1.0};
+    REQUIRE(dynamic_single.calculate(dynamic_input, wrong_trajectory) == Result::Working);
+    wrong_output.new_jerk.clear();
+    CHECK(dynamic_single.update(wrong_trajectory, wrong_output) == Result::ErrorInvalidInput);
+
+    // Zero-duration trajectories finish at their initial/terminal state.
+    input.target_position = input.current_position;
+    input.target_velocity = {0.0};
+    REQUIRE(otg.calculate(input, trajectory) == Result::Working);
+    CHECK(trajectory.get_duration() == 0.0);
+    CHECK(otg.update(trajectory, output) == Result::Finished);
+    CHECK(output.time == 0.0);
+    CHECK(output.new_position[0] == 0.0);
+
+    // A fresh output object cannot reuse another object's cached trajectory.
+    input.target_position = {1.0};
+    output = OutputParameter<1>();
+    REQUIRE(otg.update(input, output) == Result::Working);
+    output.pass_to_input(input);
+    OutputParameter<1> fresh_output;
+    REQUIRE(otg.update(input, fresh_output) == Result::Working);
+    CHECK(fresh_output.new_calculation);
+}
+
 TEST_CASE("input-validation") {
     RuckigThrow<DynamicDOFs> ruckig {2};
     InputParameter input {2};
