@@ -45,5 +45,12 @@ int main() {
     if (ruckig_update_trajectory(*executor, trajectory, output) != ruckig::Result::ErrorInvalidInput) {
         return 9;
     }
+    if (ruckig_calculate_waypoints(*otg, input, trajectory, nullptr, 0, nullptr, 0) != ruckig::Result::Working) {
+        return 10;
+    }
+    const double stopping_duration = trajectory.get_duration();
+    if (ruckig_optimize_waypoints(*otg, input, trajectory, 8) != ruckig::Result::Working || trajectory.get_duration() >= stopping_duration) {
+        return 11;
+    }
     return ruckig_calculate_waypoints(*otg, empty, trajectory, nullptr, 0, nullptr, 0) == ruckig::Result::ErrorInvalidInput ? 0 : 8;
 }

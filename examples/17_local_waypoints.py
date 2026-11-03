@@ -23,6 +23,14 @@ if result != Result.Working:
     raise RuntimeError(f'Calculation failed: {result}')
 print(f'Prescribed pass-through states: {out.trajectory.duration:.6f} s')
 
+result = otg.optimize_waypoints(inp, out.trajectory)
+if result != Result.Working:
+    raise RuntimeError(f'Optimization failed: {result}')
+print(f'Automatic pass-through states: {out.trajectory.duration:.6f} s')
+for time in out.trajectory.intermediate_durations[:-1]:
+    position, velocity, acceleration = out.trajectory.at_time(time)
+    print(f'Waypoint {position}: velocity={velocity}, acceleration={acceleration}')
+
 while True:
     result = otg.update(out.trajectory, out)
     if result == Result.Finished:

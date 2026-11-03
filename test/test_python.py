@@ -126,6 +126,40 @@ class WrapperRegressionTest(unittest.TestCase):
         self.input.intermediate_positions = [[3000.0], [6000.0]]
         self.assertEqual(Ruckig(1).calculate_waypoints(self.input, Trajectory(1)), Result.ErrorTrajectoryDuration)
 
+    def test_automatic_waypoint_states(self):
+        otg = Ruckig(1, 0.1)
+        self.input.max_velocity = [2.0]
+        self.input.max_acceleration = [2.0]
+        self.input.max_jerk = [4.0]
+        self.input.target_position = [3.0]
+        self.input.intermediate_positions = [[1.0], [2.0]]
+        baseline, optimized = Trajectory(1), Trajectory(1)
+        self.assertEqual(otg.calculate_waypoints(self.input, baseline), Result.Working)
+        self.assertEqual(otg.optimize_waypoints(self.input, optimized), Result.Working)
+        self.assertLess(optimized.duration, baseline.duration * 0.8)
+        for i, time in enumerate(optimized.intermediate_durations[:-1]):
+            p, v, a = optimized.at_time(time)
+            self.assertAlmostEqual(p[0], i + 1.0)
+            self.assertGreater(v[0], 0.1)
+            self.assertGreater(abs(a[0]), 0.01)
+        self.assertEqual(otg.optimize_waypoints(self.input, baseline, max_iterations=0), Result.Working)
+        self.assertLess(optimized.duration, baseline.duration)
+        with self.assertRaises(RuckigError):
+            otg.optimize_waypoints(self.input, optimized, max_iterations=65)
+        with self.assertRaises(RuckigError):
+            otg.update(optimized, OutputParameter(1))
+
+    def test_automatic_search_can_reject_trials_without_throwing(self):
+        otg = Ruckig(1)
+        self.input.current_velocity = [1.0]
+        self.input.target_velocity = [1.0]
+        self.input.target_position = [2.0]
+        self.input.intermediate_positions = [[0.5], [1.5]]
+        self.input.max_jerk = [0.0]
+        trajectory = Trajectory(1)
+        self.assertEqual(otg.optimize_waypoints(self.input, trajectory), Result.Working)
+        self.assertAlmostEqual(trajectory.duration, 2.0)
+
 
 if __name__ == '__main__':
     unittest.main()

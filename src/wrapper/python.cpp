@@ -170,6 +170,7 @@ limited by velocity, acceleration, and jerk constraints.";
         .def("calculate", static_cast<Result (RuckigThrow<DynamicDOFs>::*)(const InputParameter<>&, Trajectory<>&, bool&)>(&RuckigThrow<DynamicDOFs>::calculate), "input"_a, "trajectory"_a, "was_interrupted"_a)
         .def("calculate_waypoints", &RuckigThrow<DynamicDOFs>::calculate_waypoints, "input"_a, "trajectory"_a,
             "intermediate_velocities"_a=std::vector<std::vector<double>>{}, "intermediate_accelerations"_a=std::vector<std::vector<double>>{})
+        .def("optimize_waypoints", &RuckigThrow<DynamicDOFs>::optimize_waypoints, "input"_a, "trajectory"_a, "max_iterations"_a=8)
         .def("update", static_cast<Result (RuckigThrow<DynamicDOFs>::*)(const InputParameter<>&, OutputParameter<>&)>(&RuckigThrow<DynamicDOFs>::update), "input"_a, "output"_a)
         .def("update", static_cast<Result (RuckigThrow<DynamicDOFs>::*)(const Trajectory<>&, OutputParameter<>&)>(&RuckigThrow<DynamicDOFs>::update), "trajectory"_a, "output"_a);
 

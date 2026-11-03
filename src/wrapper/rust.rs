@@ -69,6 +69,7 @@ mod ffi {
         fn ruckig_update_trajectory(ruckig: Pin<&mut Ruckig>, trajectory: &Trajectory, output: Pin<&mut OutputParameter>) -> i32;
         fn ruckig_calculate(ruckig: Pin<&mut Ruckig>, input: &InputParameter, trajectory: Pin<&mut Trajectory>) -> i32;
         unsafe fn ruckig_calculate_waypoints(ruckig: Pin<&mut Ruckig>, input: &InputParameter, trajectory: Pin<&mut Trajectory>, velocities: *const f64, velocity_count: usize, accelerations: *const f64, acceleration_count: usize) -> i32;
+        fn ruckig_optimize_waypoints(ruckig: Pin<&mut Ruckig>, input: &InputParameter, trajectory: Pin<&mut Trajectory>, max_iterations: usize) -> i32;
         fn ruckig_reset(ruckig: Pin<&mut Ruckig>);
     }
 }
@@ -376,6 +377,21 @@ mod tests {
         input.intermediate_positions[0].clear();
         assert_eq!(otg.calculate_waypoints(&mut input, &mut trajectory), Result::ErrorInvalidInput);
     }
+
+    #[test]
+    fn automatic_states_improve_stopping_baseline() {
+        let mut otg = Ruckig::new_direct(1, 0.1);
+        let mut input = input();
+        let mut trajectory = Trajectory::new_direct(1);
+        assert_eq!(otg.calculate_waypoints(&mut input, &mut trajectory), Result::Working);
+        let baseline = trajectory.get_duration();
+        assert_eq!(otg.optimize_waypoints(&mut input, &mut trajectory, 8), Result::Working);
+        assert!(trajectory.get_duration() < baseline);
+        assert!((trajectory.at_time(trajectory.get_duration()).0[0] - 3.0).abs() < 1e-8);
+        assert_eq!(otg.optimize_waypoints(&mut input, &mut trajectory, 65), Result::ErrorInvalidInput);
+        input.intermediate_positions[0].clear();
+        assert_eq!(otg.optimize_waypoints(&mut input, &mut trajectory, 8), Result::ErrorInvalidInput);
+    }
 }
 
 impl Ruckig {
@@ -446,5 +462,16 @@ impl Ruckig {
                 v.as_ptr(), v.len(), a.as_ptr(), a.len())
         };
         Result::from(raw)
+    }
+
+    /// Automatically choose intermediate states using a bounded offline search (0..=64 iterations).
+    pub fn optimize_waypoints(&mut self, input: &mut InputParameter, trajectory: &mut Trajectory, max_iterations: usize) -> Result {
+        if input.degrees_of_freedom == 0 || input.intermediate_positions.iter().any(|row| row.len() != input.degrees_of_freedom) {
+            let dofs = ffi::traj_get_dofs(&trajectory.0);
+            *trajectory = Trajectory::new_direct(dofs);
+            return Result::ErrorInvalidInput;
+        }
+        input.apply();
+        Result::from(ffi::ruckig_optimize_waypoints(self.0.pin_mut(), &input.inner, trajectory.0.pin_mut(), max_iterations))
     }
 }

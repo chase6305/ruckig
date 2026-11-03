@@ -208,3 +208,140 @@ TEST_CASE("local-duration-limit-and-stationary-chain") {
     input.max_position = {std::numeric_limits<double>::infinity()};
     CHECK(otg.calculate_waypoints(input, trajectory) == Result::ErrorTrajectoryDuration);
 }
+
+template<size_t DOFs>
+void check_sampled_limits(const InputParameter<DOFs>& input, const Trajectory<DOFs>& trajectory) {
+    auto p = input.current_position, v = p, a = p, j = p;
+    size_t section = 0;
+    for (size_t sample = 0; sample <= 200; ++sample) {
+        trajectory.at_time(trajectory.get_duration() * sample / 200.0, p, v, a, j, section);
+        for (size_t d = 0; d < input.degrees_of_freedom; ++d) {
+            CHECK(p[d] >= input.min_position[d] - 1e-8);
+            CHECK(p[d] <= input.max_position[d] + 1e-8);
+            CHECK(v[d] >= (input.min_velocity ? (*input.min_velocity)[d] : -input.max_velocity[d]) - 1e-8);
+            CHECK(v[d] <= input.max_velocity[d] + 1e-8);
+            CHECK(a[d] >= (input.min_acceleration ? (*input.min_acceleration)[d] : -input.max_acceleration[d]) - 1e-8);
+            CHECK(a[d] <= input.max_acceleration[d] + 1e-8);
+            CHECK(std::abs(j[d]) <= input.max_jerk[d] + 1e-8);
+        }
+    }
+}
+
+TEST_CASE("automatic-states-and-bounded-refinement") {
+    RuckigThrow<1> otg(0.01);
+    auto input = make_input<1>();
+    input.intermediate_positions = {{1.0}, {2.0}};
+    const auto original = input;
+    Trajectory<1> baseline, coarse, optimized;
+    REQUIRE(otg.calculate_waypoints(input, baseline) == Result::Working);
+    REQUIRE(otg.optimize_waypoints(input, coarse, 0) == Result::Working);
+    CHECK(coarse.get_duration() == baseline.get_duration());
+    REQUIRE(otg.optimize_waypoints(input, coarse, 1) == Result::Working);
+    REQUIRE(otg.optimize_waypoints(input, optimized) == Result::Working);
+    CHECK(optimized.get_duration() <= coarse.get_duration());
+    CHECK(optimized.get_duration() < baseline.get_duration() * 0.8);
+    CHECK_FALSE(input != original);
+    const auto times = optimized.get_intermediate_durations();
+    for (size_t i = 0; i < input.intermediate_positions.size(); ++i) {
+        double p = 0.0, v = 0.0, a = 0.0;
+        optimized.at_time(times[i], p, v, a);
+        CHECK(p == doctest::Approx(input.intermediate_positions[i][0]));
+        CHECK(v > 0.1);
+        CHECK(std::abs(a) > 0.1);
+        double lp = 0.0, lv = 0.0, la = 0.0;
+        optimized.at_time(times[i] - 1e-7, lp, lv, la);
+        CHECK(std::abs(lp - p) < 1e-6);
+        CHECK(std::abs(lv - v) < 1e-6);
+        CHECK(std::abs(la - a) < 1e-6);
+    }
+    check_sampled_limits(input, optimized);
+    Trajectory<1> repeated;
+    REQUIRE(otg.optimize_waypoints(input, repeated) == Result::Working);
+    CHECK(repeated.get_duration() == optimized.get_duration());
+    OutputParameter<1> output;
+    otg.delta_time = optimized.get_duration() + 1.0;
+    CHECK(otg.update(optimized, output) == Result::Finished);
+    CHECK(output.new_position[0] == doctest::Approx(3.0));
+}
+
+TEST_CASE("automatic-multi-axis-and-directional-limits") {
+    Ruckig<2> otg(0.01);
+    auto input = make_input<2>();
+    input.intermediate_positions = {{1.0, 0.5}, {2.0, 1.0}};
+    input.target_position = {3.0, 1.5};
+    Trajectory<2> baseline, optimized;
+    REQUIRE(otg.calculate_waypoints(input, baseline) == Result::Working);
+    REQUIRE(otg.optimize_waypoints(input, optimized) == Result::Working);
+    CHECK(optimized.get_duration() < baseline.get_duration());
+    check_sampled_limits(input, optimized);
+
+    input.intermediate_positions = {{-1.0, -0.5}, {-2.0, -1.0}};
+    input.target_position = {-3.0, -1.5};
+    input.min_position = {-4.0, -4.0};
+    input.max_position = {0.0, 0.0};
+    input.min_velocity = std::array<double, 2>{-0.75, -0.75};
+    input.min_acceleration = std::array<double, 2>{-0.5, -0.5};
+    REQUIRE(otg.calculate_waypoints(input, baseline) == Result::Working);
+    REQUIRE(otg.optimize_waypoints(input, optimized) == Result::Working);
+    CHECK(optimized.get_duration() <= baseline.get_duration());
+    check_sampled_limits(input, optimized);
+}
+
+TEST_CASE("automatic-reversals-and-repeated-waypoints") {
+    Ruckig<1> otg;
+    auto input = make_input<1>();
+    input.intermediate_positions = {{1.0}};
+    input.target_position = {0.0};
+    input.min_position = {0.0};
+    input.max_position = {1.0};
+    Trajectory<1> baseline, optimized;
+    REQUIRE(otg.calculate_waypoints(input, baseline) == Result::Working);
+    REQUIRE(otg.optimize_waypoints(input, optimized) == Result::Working);
+    CHECK(optimized.get_duration() <= baseline.get_duration());
+    double p = 0.0, v = 0.0, a = 0.0;
+    optimized.at_time(optimized.get_intermediate_durations()[0], p, v, a);
+    CHECK(p == doctest::Approx(1.0));
+    CHECK(std::abs(v) < 1e-8);
+    CHECK(a <= 0.0);
+    check_sampled_limits(input, optimized);
+
+    input.intermediate_positions = {{0.0}, {1.0}, {1.0}};
+    REQUIRE(otg.calculate_waypoints(input, baseline) == Result::Working);
+    REQUIRE(otg.optimize_waypoints(input, optimized) == Result::Working);
+    CHECK(optimized.get_duration() <= baseline.get_duration());
+    CHECK(optimized.get_intermediate_durations().size() == 4);
+    check_sampled_limits(input, optimized);
+}
+
+TEST_CASE("automatic-feasible-seed-with-infeasible-stopping-baseline") {
+    Ruckig<1> otg;
+    auto input = make_input<1>();
+    input.current_velocity = input.target_velocity = {1.0};
+    input.max_velocity = {1.0};
+    input.max_jerk = {0.0};
+    input.intermediate_positions = {{0.5}, {1.5}};
+    input.target_position = {2.0};
+    Trajectory<1> trajectory;
+    CHECK(otg.calculate_waypoints(input, trajectory) == Result::ErrorZeroLimits);
+    REQUIRE(otg.optimize_waypoints(input, trajectory) == Result::Working);
+    CHECK(trajectory.get_duration() == doctest::Approx(2.0));
+    check_sampled_limits(input, trajectory);
+}
+
+TEST_CASE("automatic-validation-and-invalidation") {
+    Ruckig<> otg(2, 0.01);
+    auto input = make_input<0>(2);
+    input.intermediate_positions = {{1.0, 1.0}};
+    Trajectory<> trajectory(2);
+    REQUIRE(otg.optimize_waypoints(input, trajectory) == Result::Working);
+    CHECK(otg.optimize_waypoints(input, trajectory, 65) == Result::ErrorInvalidInput);
+    OutputParameter<> output(2);
+    CHECK(otg.update(trajectory, output) == Result::ErrorInvalidInput);
+    input.max_position = {0.5, 0.5};
+    CHECK(otg.optimize_waypoints(input, trajectory) == Result::ErrorPositionalLimits);
+    CHECK(otg.update(trajectory, output) == Result::ErrorInvalidInput);
+    input.intermediate_positions[0].clear();
+    CHECK(otg.optimize_waypoints(input, trajectory) == Result::ErrorInvalidInput);
+    RuckigThrow<0> throwing(2, 0.01);
+    CHECK_THROWS_AS(throwing.optimize_waypoints(input, trajectory, 65), RuckigError);
+}

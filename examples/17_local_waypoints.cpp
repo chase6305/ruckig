@@ -25,6 +25,10 @@ int main() {
         return 2;
     }
     std::cout << "Prescribed pass-through states: " << output.trajectory.get_duration() << " s\n";
+    if (otg.optimize_waypoints(input, output.trajectory) != Result::Working) {
+        return 4;
+    }
+    std::cout << "Automatic pass-through states: " << output.trajectory.get_duration() << " s\n";
     Result result;
     do {
         result = otg.update(output.trajectory, output);

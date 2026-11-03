@@ -113,4 +113,7 @@ int ruckig_calculate_waypoints(Ruckig& ruckig, const InputParameter& input, Traj
     }
     return static_cast<int>(ruckig.calculate_waypoints(input, trajectory, v, a));
 }
+int ruckig_optimize_waypoints(Ruckig& ruckig, const InputParameter& input, Trajectory& trajectory, size_t max_iterations) {
+    return static_cast<int>(ruckig.optimize_waypoints(input, trajectory, max_iterations));
+}
 void ruckig_reset(Ruckig& ruckig) { ruckig.reset(); }
