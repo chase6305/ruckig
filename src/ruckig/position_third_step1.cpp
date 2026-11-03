@@ -587,7 +587,7 @@ return_block:
     // A newly recovered long root must not suppress the single-jerk fallback.
     // Recover a missing short solution only when the intervening gap is provable.
     const bool one_duration = profile == start + 1 || (profile == start + 2
-        && std::abs(start[0].t_sum.back() - start[1].t_sum.back()) < 8 * DBL_EPSILON);
+        && std::abs(start[0].t_sum.back() - start[1].t_sum.back()) < 8 * DBL_EPSILON * std::max({1.0, start[0].t_sum.back(), start[1].t_sum.back()}));
     if (one_duration && af != a0) {
         Profile single;
         single.set_boundary(input);
@@ -600,7 +600,7 @@ return_block:
         // For tf > single.t[0], tf below this bound cannot reach the target velocity.
         const double isolation_bound = 2 * std::abs(a0/_jMax + af/_jMax) - single.t[0];
         const double velocity_roundoff = 64 * DBL_EPSILON * std::max({1.0, std::abs(v0), std::abs(vf),
-            std::abs(a0 * single.t[0]), std::abs(jf * single.t[0] * single.t[0])});
+            std::abs(a0 * single.t[0]), std::abs(jf * single.t[0] * single.t[0]), a0_a0/_jMax, af_af/_jMax});
         const double gap = start->t_sum.back() - single.t[0];
         if (single.t[0] < start->t_sum.back() - time_margin
             && std::isfinite(isolation_bound) && start->t_sum.back() <= isolation_bound + time_margin
