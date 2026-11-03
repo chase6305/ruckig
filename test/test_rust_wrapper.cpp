@@ -42,5 +42,8 @@ int main() {
         return 7;
     }
     InputParameter empty(0);
+    if (ruckig_update_trajectory(*executor, trajectory, output) != ruckig::Result::ErrorInvalidInput) {
+        return 9;
+    }
     return ruckig_calculate_waypoints(*otg, empty, trajectory, nullptr, 0, nullptr, 0) == ruckig::Result::ErrorInvalidInput ? 0 : 8;
 }

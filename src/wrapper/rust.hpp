@@ -99,6 +99,7 @@ int ruckig_calculate_waypoints(Ruckig& ruckig, const InputParameter& input, Traj
     const size_t dofs = input.degrees_of_freedom;
     if (dofs == 0 || (velocity_count != 0 && velocity_count / dofs != count) || (acceleration_count != 0 && acceleration_count / dofs != count)
         || velocity_count % dofs != 0 || acceleration_count % dofs != 0) {
+        trajectory = Trajectory(trajectory.degrees_of_freedom);
         return ruckig::Result::ErrorInvalidInput;
     }
     std::vector<std::vector<double>> v, a;

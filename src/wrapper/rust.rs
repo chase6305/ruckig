@@ -370,6 +370,9 @@ mod tests {
         assert!((trajectory.at_time(trajectory.get_duration()).0[0] - 3.0).abs() < 1e-8);
         assert_eq!(otg.calculate_waypoints_with_states(&mut input, &mut trajectory,
             &[vec![0.5]], &[]), Result::ErrorInvalidInput);
+        let mut executor = Ruckig::new_direct(1, 0.1);
+        let mut output = OutputParameter::new_direct(1);
+        assert_eq!(executor.update_trajectory(&trajectory, &mut output), Result::ErrorInvalidInput);
         input.intermediate_positions[0].clear();
         assert_eq!(otg.calculate_waypoints(&mut input, &mut trajectory), Result::ErrorInvalidInput);
     }
@@ -431,6 +434,8 @@ impl Ruckig {
             || (!velocities.is_empty() && velocities.len() != count)
             || (!accelerations.is_empty() && accelerations.len() != count)
             || velocities.iter().chain(accelerations.iter()).any(|row| row.len() != dofs) {
+            let trajectory_dofs = ffi::traj_get_dofs(&trajectory.0);
+            *trajectory = Trajectory::new_direct(trajectory_dofs);
             return Result::ErrorInvalidInput;
         }
         let v: Vec<f64> = velocities.iter().flatten().copied().collect();
