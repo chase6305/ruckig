@@ -211,6 +211,8 @@ public:
     Result calculate(const InputParameter<DOFs, CustomVector>& input, Trajectory<DOFs, CustomVector>& trajectory, bool& was_interrupted) {
         current_input_initialized = false;
         trajectory.calculated = false;
+        trajectory.local_profiles.clear();
+        trajectory.local_cumulative_times.clear();
         if (degrees_of_freedom != trajectory.degrees_of_freedom) {
             if constexpr (throw_error) {
                 throw RuckigError("mismatch in degrees of freedom (vector size).");
@@ -230,6 +232,120 @@ public:
         }
         trajectory.calculated = true;
         return result;
+    }
+
+    //! Calculate a local chain. Omitted intermediate velocities/accelerations default to zero.
+    //! This offline operation allocates memory; it does not optimize the intermediate states.
+    Result calculate_waypoints(const InputParameter<DOFs, CustomVector>& input, Trajectory<DOFs, CustomVector>& trajectory,
+        const std::vector<Vector<double>>& intermediate_velocities = {}, const std::vector<Vector<double>>& intermediate_accelerations = {}) {
+        current_input_initialized = false;
+        trajectory.calculated = false;
+        const auto invalid = [](const char* message) {
+            if constexpr (throw_error) {
+                throw RuckigError(message);
+            }
+            return Result::ErrorInvalidInput;
+        };
+        if (input.degrees_of_freedom != degrees_of_freedom || trajectory.degrees_of_freedom != degrees_of_freedom) {
+            return invalid("mismatch in degrees of freedom (vector size).");
+        }
+        if (!input.template validate<throw_error>()) {
+            return Result::ErrorInvalidInput;
+        }
+        const size_t count = input.intermediate_positions.size();
+        if ((!intermediate_velocities.empty() && intermediate_velocities.size() != count)
+            || (!intermediate_accelerations.empty() && intermediate_accelerations.size() != count)) {
+            return invalid("intermediate state counts must match the number of waypoints.");
+        }
+        if (input.per_section_max_velocity || input.per_section_max_acceleration || input.per_section_max_jerk
+            || input.per_section_min_velocity || input.per_section_min_acceleration
+            || input.per_section_max_position || input.per_section_min_position || input.per_section_minimum_duration
+            || input.interrupt_calculation_duration) {
+            return invalid("local waypoint calculation does not support per-section limits or interruption.");
+        }
+        if (count == 0) {
+            return calculate(input, trajectory);
+        }
+        if (input.control_interface != ControlInterface::Position || input.per_dof_control_interface || input.per_dof_synchronization
+            || (input.synchronization != Synchronization::Time && input.synchronization != Synchronization::Phase)) {
+            return invalid("local waypoint calculation requires position control and global time or phase synchronization.");
+        }
+        for (size_t dof = 0; dof < degrees_of_freedom; ++dof) {
+            if (!input.enabled[dof]) {
+                return invalid("all degrees of freedom must be enabled for local waypoint calculation.");
+            }
+            if (!std::isfinite(input.current_position[dof]) || !std::isfinite(input.target_position[dof])
+                || !std::isfinite(input.current_velocity[dof]) || !std::isfinite(input.target_velocity[dof])
+                || !std::isfinite(input.current_acceleration[dof]) || !std::isfinite(input.target_acceleration[dof])) {
+                return invalid("local waypoint states must be finite.");
+            }
+        }
+        auto section_input = input;
+        section_input.intermediate_positions.clear();
+        // Validate both arrival and departure feasibility of the specified intermediate states.
+        for (size_t i = 0; i < count; ++i) {
+            if ((!intermediate_velocities.empty() && intermediate_velocities[i].size() != degrees_of_freedom)
+                || (!intermediate_accelerations.empty() && intermediate_accelerations[i].size() != degrees_of_freedom)) {
+                return invalid("mismatch in degrees of freedom (intermediate state vector size).");
+            }
+            for (size_t dof = 0; dof < degrees_of_freedom; ++dof) {
+                const double p = input.intermediate_positions[i][dof];
+                const double v = intermediate_velocities.empty() ? 0.0 : intermediate_velocities[i][dof];
+                const double a = intermediate_accelerations.empty() ? 0.0 : intermediate_accelerations[i][dof];
+                if (!std::isfinite(p) || !std::isfinite(v) || !std::isfinite(a)) {
+                    return invalid("local waypoint states must be finite.");
+                }
+                section_input.current_position[dof] = section_input.target_position[dof] = p;
+                section_input.current_velocity[dof] = section_input.target_velocity[dof] = v;
+                section_input.current_acceleration[dof] = section_input.target_acceleration[dof] = a;
+            }
+            if (!section_input.template validate<throw_error>(true, true)) {
+                return Result::ErrorInvalidInput;
+            }
+        }
+        const auto make_trajectory = [this]() {
+            if constexpr (DOFs == 0) {
+                return Trajectory<DOFs, CustomVector>(degrees_of_freedom);
+            } else {
+                return Trajectory<DOFs, CustomVector>();
+            }
+        };
+        auto result = make_trajectory();
+        auto section = make_trajectory();
+        result.local_profiles.reserve(count + 1);
+        result.local_cumulative_times.reserve(count + 1);
+        for (size_t dof = 0; dof < degrees_of_freedom; ++dof) {
+            result.independent_min_durations[dof] = 0.0;
+        }
+        section_input = input;
+        section_input.intermediate_positions.clear();
+        for (size_t i = 0; i <= count; ++i) {
+            for (size_t dof = 0; dof < degrees_of_freedom; ++dof) {
+                section_input.target_position[dof] = i == count ? input.target_position[dof] : input.intermediate_positions[i][dof];
+                section_input.target_velocity[dof] = i == count ? input.target_velocity[dof] : (intermediate_velocities.empty() ? 0.0 : intermediate_velocities[i][dof]);
+                section_input.target_acceleration[dof] = i == count ? input.target_acceleration[dof] : (intermediate_accelerations.empty() ? 0.0 : intermediate_accelerations[i][dof]);
+            }
+            const auto status = calculate(section_input, section);
+            if (status != Result::Working) {
+                return status;
+            }
+            result.duration += section.get_duration();
+            if (!std::isfinite(result.duration) || result.duration > 7.6e3) {
+                return Result::ErrorTrajectoryDuration;
+            }
+            result.local_profiles.push_back(section.profiles[0]);
+            result.local_cumulative_times.push_back(result.duration);
+            for (size_t dof = 0; dof < degrees_of_freedom; ++dof) {
+                result.independent_min_durations[dof] += section.independent_min_durations[dof];
+            }
+            // Share the specified boundary state without accumulating endpoint roundoff.
+            section_input.current_position = section_input.target_position;
+            section_input.current_velocity = section_input.target_velocity;
+            section_input.current_acceleration = section_input.target_acceleration;
+        }
+        result.calculated = true;
+        trajectory = std::move(result);
+        return Result::Working;
     }
 
     //! Advance a previously calculated trajectory, clamping at its terminal state.

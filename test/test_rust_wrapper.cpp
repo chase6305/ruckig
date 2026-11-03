@@ -23,5 +23,24 @@ int main() {
     for (size_t i = 0; result == ruckig::Result::Working && i < 100; ++i) {
         result = ruckig_update_trajectory(*executor, trajectory, output);
     }
-    return !(result == ruckig::Result::Finished && output.time == trajectory.get_duration());
+    if (!(result == ruckig::Result::Finished && output.time == trajectory.get_duration())) {
+        return 3;
+    }
+    input.intermediate_positions = {{0.5, 0.5}};
+    if (ruckig_calculate_waypoints(*otg, input, trajectory, nullptr, 0, nullptr, 0) != ruckig::Result::Working) {
+        return 4;
+    }
+    if (trajectory.get_profiles().size() != 2) {
+        return 5;
+    }
+    double velocities[] = {0.2, 0.2};
+    double accelerations[] = {0.0, 0.0};
+    if (ruckig_calculate_waypoints(*otg, input, trajectory, velocities, 2, accelerations, 2) != ruckig::Result::Working) {
+        return 6;
+    }
+    if (ruckig_calculate_waypoints(*otg, input, trajectory, velocities, 1, accelerations, 2) != ruckig::Result::ErrorInvalidInput) {
+        return 7;
+    }
+    InputParameter empty(0);
+    return ruckig_calculate_waypoints(*otg, empty, trajectory, nullptr, 0, nullptr, 0) == ruckig::Result::ErrorInvalidInput ? 0 : 8;
 }

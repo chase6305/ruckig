@@ -2,6 +2,7 @@
 
 #include <array>
 #include <functional>
+#include <span>
 #include <tuple>
 #include <vector>
 
@@ -31,6 +32,9 @@ class Trajectory {
     template<size_t, template<class, size_t> class, bool> friend class Ruckig;
 
     Container<Vector<Profile>> profiles;
+    // Allocated only for explicit local multi-waypoint calculations.
+    std::vector<Vector<Profile>> local_profiles;
+    std::vector<double> local_cumulative_times;
 
     double duration {0.0};
     bool calculated {false};
@@ -39,6 +43,14 @@ class Trajectory {
     Vector<double> independent_min_durations;
 
     size_t continue_calculation_counter {0};
+
+    std::span<const Vector<Profile>> profiles_view() const {
+        return local_profiles.empty() ? std::span<const Vector<Profile>>(profiles) : std::span<const Vector<Profile>>(local_profiles);
+    }
+
+    std::span<const double> times_view() const {
+        return local_profiles.empty() ? std::span<const double>(cumulative_times) : std::span<const double>(local_cumulative_times);
+    }
 
 #if defined WITH_CLOUD_CLIENT
     template<size_t D = DOFs, typename std::enable_if<(D >= 1), int>::type = 0>
@@ -60,12 +72,14 @@ class Trajectory {
     //! Calculates the base values to then integrate from
     template<typename Func>
     void state_to_integrate_from(double time, size_t& new_section, Func&& set_integrate) const {
+        const auto profiles = profiles_view();
+        const auto cumulative_times = times_view();
         if (time >= duration) {
             // Keep constant acceleration
             new_section = profiles.size();
             const auto& profiles_dof = profiles.back();
             for (size_t dof = 0; dof < degrees_of_freedom; ++dof) {
-                const double t_pre = (profiles.size() > 1) ? cumulative_times[cumulative_times.size() - 2] : profiles_dof[dof].brake.duration;
+                const double t_pre = ((profiles.size() > 1) ? cumulative_times[cumulative_times.size() - 2] : 0.0) + profiles_dof[dof].brake.duration;
                 const double t_diff = time - (t_pre + profiles_dof[dof].t_sum.back());
                 set_integrate(dof, t_diff, profiles_dof[dof].p.back(), profiles_dof[dof].v.back(), profiles_dof[dof].a.back(), 0.0);
             }
@@ -84,7 +98,7 @@ class Trajectory {
             double t_diff_dof = t_diff;
 
             // Brake pre-trajectory
-            if (new_section == 0 && p.brake.duration > 0) {
+            if (p.brake.duration > 0) {
                 if (t_diff_dof < p.brake.duration) {
                     const size_t index = (t_diff_dof < p.brake.t[0]) ? 0 : 1;
                     if (index > 0) {
@@ -140,6 +154,8 @@ class Trajectory {
     }
 
     Bound get_position_extrema_for_dof(size_t dof) const {
+        const auto profiles = profiles_view();
+        const auto cumulative_times = times_view();
         Bound extrema {std::numeric_limits<double>::infinity(), -std::numeric_limits<double>::infinity(), 0.0, 0.0};
         double section_start = 0.0;
         for (size_t section = 0; section < profiles.size(); ++section) {
@@ -297,8 +313,9 @@ public:
     }
 
     //! Get the underlying profiles of the trajectory (only in the Ruckig Community Version)
-    Container<Vector<Profile>> get_profiles() const {
-        return profiles;
+    std::vector<Vector<Profile>> get_profiles() const {
+        const auto view = profiles_view();
+        return {view.begin(), view.end()};
     }
 
     //! Get the duration of the (synchronized) trajectory
@@ -307,8 +324,9 @@ public:
     }
 
     //! Get the durations when the intermediate waypoints are reached
-    Container<double> get_intermediate_durations() const {
-        return cumulative_times;
+    std::vector<double> get_intermediate_durations() const {
+        const auto view = times_view();
+        return {view.begin(), view.end()};
     }
 
     //! Get the minimum duration of each independent DoF
@@ -328,15 +346,57 @@ public:
 
     //! Get the time that this trajectory passes a specific position of a given DoF the first time
     std::optional<double> get_first_time_at_position(size_t dof, double position, double time_after=0.0) const {
-        if (dof >= degrees_of_freedom) {
+        const auto profiles = profiles_view();
+        const auto cumulative_times = times_view();
+        if (dof >= degrees_of_freedom || !std::isfinite(time_after)) {
             return std::nullopt;
         }
 
-        double time;
+        const auto find_in_step = [&](double start, double duration, double p, double v, double a, double j) -> std::optional<double> {
+            const double earliest = std::max(0.0, time_after - start);
+            if (earliest > duration) {
+                return std::nullopt;
+            }
+            if (std::abs(std::get<0>(integrate(earliest, p, v, a, j)) - position) < 1e-9) {
+                return start + earliest;
+            }
+            std::optional<double> first;
+            for (double t: roots::solve_cubic(j / 6, a / 2, v, p - position)) {
+                if (earliest <= t && t <= duration && (!first || t < *first)) {
+                    first = t;
+                }
+            }
+            if (!first && std::abs(std::get<0>(integrate(duration, p, v, a, j)) - position) < 1e-9) {
+                first = duration;
+            }
+            return first ? std::optional<double>(start + *first) : std::nullopt;
+        };
         for (size_t i = 0; i < profiles.size(); ++i) {
-            if (profiles[i][dof].get_first_state_at_position(position, time, time_after)) {
-                const double section_time = (i > 0) ? cumulative_times[i-1] : 0.0;
-                return section_time + time;
+            const double section_time = (i > 0) ? cumulative_times[i-1] : 0.0;
+            const auto& profile = profiles[i][dof];
+            double start = section_time;
+            if (profile.brake.duration > 0.0) {
+                for (size_t step = 0; step < 2; ++step) {
+                    if (profile.brake.t[step] > 0.0) {
+                        if (auto time = find_in_step(start, profile.brake.t[step], profile.brake.p[step], profile.brake.v[step], profile.brake.a[step], profile.brake.j[step])) {
+                            return time;
+                        }
+                        start += profile.brake.t[step];
+                    }
+                }
+            }
+            if (profile.t_sum.back() > 0.0) {
+                for (size_t step = 0; step < 7; ++step) {
+                    if (profile.t[step] > 0.0) {
+                        if (auto time = find_in_step(start, profile.t[step], profile.p[step], profile.v[step], profile.a[step], profile.j[step])) {
+                            return time;
+                        }
+                        start += profile.t[step];
+                    }
+                }
+            }
+            if (auto time = find_in_step(start, std::max(0.0, cumulative_times[i] - start), profile.p.back(), profile.v.back(), profile.a.back(), 0.0)) {
+                return time;
             }
         }
         return std::nullopt;

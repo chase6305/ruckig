@@ -68,6 +68,7 @@ mod ffi {
         fn ruckig_update(ruckig: Pin<&mut Ruckig>, input: &InputParameter, output: Pin<&mut OutputParameter>) -> i32;
         fn ruckig_update_trajectory(ruckig: Pin<&mut Ruckig>, trajectory: &Trajectory, output: Pin<&mut OutputParameter>) -> i32;
         fn ruckig_calculate(ruckig: Pin<&mut Ruckig>, input: &InputParameter, trajectory: Pin<&mut Trajectory>) -> i32;
+        unsafe fn ruckig_calculate_waypoints(ruckig: Pin<&mut Ruckig>, input: &InputParameter, trajectory: Pin<&mut Trajectory>, velocities: *const f64, velocity_count: usize, accelerations: *const f64, acceleration_count: usize) -> i32;
         fn ruckig_reset(ruckig: Pin<&mut Ruckig>);
     }
 }
@@ -325,6 +326,55 @@ impl OutputParameter {
 
 pub struct Ruckig(UniquePtr<ffi::Ruckig>);
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn input() -> InputParameter {
+        let mut input = InputParameter::new(1);
+        input.target_position = vec![3.0];
+        input.intermediate_positions = vec![vec![1.0], vec![2.0]];
+        input.max_velocity = vec![1.0];
+        input.max_acceleration = vec![1.0];
+        input.max_jerk = vec![1.0];
+        input
+    }
+
+    #[test]
+    fn local_stop_and_replay() {
+        let mut otg = Ruckig::new_direct(1, 0.1);
+        let mut input = input();
+        let mut trajectory = Trajectory::new_direct(1);
+        assert_eq!(otg.calculate_waypoints(&mut input, &mut trajectory), Result::Working);
+        let (p, v, a) = trajectory.at_time(trajectory.get_duration() / 3.0);
+        assert!((p[0] - 1.0).abs() < 1e-8);
+        assert!(v[0].abs() < 1e-8 && a[0].abs() < 1e-8);
+        let mut output = OutputParameter::new_direct(1);
+        let mut result = Result::Working;
+        for _ in 0..1000 {
+            result = otg.update_trajectory(&trajectory, &mut output);
+            if result != Result::Working { break; }
+        }
+        assert_eq!(result, Result::Finished);
+        assert_eq!(output.time, trajectory.get_duration());
+        assert!((output.new_position[0] - 3.0).abs() < 1e-8);
+    }
+
+    #[test]
+    fn local_prescribed_and_malformed_states() {
+        let mut otg = Ruckig::new_direct_and_offline(1);
+        let mut input = input();
+        let mut trajectory = Trajectory::new_direct(1);
+        assert_eq!(otg.calculate_waypoints_with_states(&mut input, &mut trajectory,
+            &[vec![0.5], vec![0.5]], &[vec![0.0], vec![0.0]]), Result::Working);
+        assert!((trajectory.at_time(trajectory.get_duration()).0[0] - 3.0).abs() < 1e-8);
+        assert_eq!(otg.calculate_waypoints_with_states(&mut input, &mut trajectory,
+            &[vec![0.5]], &[]), Result::ErrorInvalidInput);
+        input.intermediate_positions[0].clear();
+        assert_eq!(otg.calculate_waypoints(&mut input, &mut trajectory), Result::ErrorInvalidInput);
+    }
+}
+
 impl Ruckig {
     pub fn new_direct_and_offline(dofs: usize) -> Self {
         Self(ffi::ruckig_new_direct_and_offline(dofs))
@@ -364,6 +414,32 @@ impl Ruckig {
         if raw >= 0 {
             output.sync();
         }
+        Result::from(raw)
+    }
+
+    /// Calculate local segments with zero velocity and acceleration at intermediate positions.
+    pub fn calculate_waypoints(&mut self, input: &mut InputParameter, trajectory: &mut Trajectory) -> Result {
+        self.calculate_waypoints_with_states(input, trajectory, &[], &[])
+    }
+
+    /// Calculate local segments with supplied intermediate states; empty arrays default to zero.
+    pub fn calculate_waypoints_with_states(&mut self, input: &mut InputParameter, trajectory: &mut Trajectory,
+        velocities: &[Vec<f64>], accelerations: &[Vec<f64>]) -> Result {
+        let dofs = input.degrees_of_freedom;
+        let count = input.intermediate_positions.len();
+        if dofs == 0 || input.intermediate_positions.iter().any(|row| row.len() != dofs)
+            || (!velocities.is_empty() && velocities.len() != count)
+            || (!accelerations.is_empty() && accelerations.len() != count)
+            || velocities.iter().chain(accelerations.iter()).any(|row| row.len() != dofs) {
+            return Result::ErrorInvalidInput;
+        }
+        let v: Vec<f64> = velocities.iter().flatten().copied().collect();
+        let a: Vec<f64> = accelerations.iter().flatten().copied().collect();
+        input.apply();
+        let raw = unsafe {
+            ffi::ruckig_calculate_waypoints(self.0.pin_mut(), &input.inner, trajectory.0.pin_mut(),
+                v.as_ptr(), v.len(), a.as_ptr(), a.len())
+        };
         Result::from(raw)
     }
 }
