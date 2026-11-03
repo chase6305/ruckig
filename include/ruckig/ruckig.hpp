@@ -172,6 +172,12 @@ public:
     //! Validate the input as well as the Ruckig instance for trajectory calculation
     template<bool throw_validation_error = true>
     bool validate_input(const InputParameter<DOFs, CustomVector>& input, bool check_current_state_within_limits = false, bool check_target_state_within_limits = true) const {
+        if (degrees_of_freedom != input.degrees_of_freedom) {
+            if constexpr (throw_validation_error) {
+                throw RuckigError("mismatch in degrees of freedom (vector size).");
+            }
+            return false;
+        }
         if (!input.template validate<throw_validation_error>(check_current_state_within_limits, check_target_state_within_limits)) {
             return false;
         }
@@ -203,6 +209,12 @@ public:
 
     //! Calculate a new trajectory for the given input and check for interruption
     Result calculate(const InputParameter<DOFs, CustomVector>& input, Trajectory<DOFs, CustomVector>& trajectory, bool& was_interrupted) {
+        if (degrees_of_freedom != trajectory.degrees_of_freedom) {
+            if constexpr (throw_error) {
+                throw RuckigError("mismatch in degrees of freedom (vector size).");
+            }
+            return Result::ErrorInvalidInput;
+        }
         if (!validate_input<throw_error>(input, false, true)) {
             return Result::ErrorInvalidInput;
         }
@@ -214,9 +226,12 @@ public:
     Result update(const InputParameter<DOFs, CustomVector>& input, OutputParameter<DOFs, CustomVector>& output) {
         const auto start = std::chrono::steady_clock::now();
 
-        if constexpr (DOFs == 0 && throw_error) {
+        if constexpr (DOFs == 0) {
             if (degrees_of_freedom != input.degrees_of_freedom || degrees_of_freedom != output.degrees_of_freedom) {
-                throw RuckigError("mismatch in degrees of freedom (vector size).");
+                if constexpr (throw_error) {
+                    throw RuckigError("mismatch in degrees of freedom (vector size).");
+                }
+                return Result::ErrorInvalidInput;
             }
         }
 

@@ -243,12 +243,13 @@ public:
 
     //! Get the kinematic state at multiple times
     //! The Python wrapper takes `times` as an argument, and returns `positions`, `velocities`, and `accelerations` instead.
-    void at_times(const Container<double>& times, Container<CustomVector<double, DOFs>>& positions, Container<CustomVector<double, DOFs>>& velocities, Container<CustomVector<double, DOFs>>& accelerations) const {
-        size_t new_section;
+    template<class Times, class States>
+    void at_times(const Times& times, States& positions, States& velocities, States& accelerations) const {
+        if (positions.size() != times.size() || velocities.size() != times.size() || accelerations.size() != times.size()) {
+            throw RuckigError("mismatch in number of samples (vector size).");
+        }
         for (size_t i = 0; i < times.size(); ++i) {
-            state_to_integrate_from(times[i], new_section, [&](size_t dof, double t, double p, double v, double a, double j) {
-                std::tie(positions[i][dof], velocities[i][dof], accelerations[i][dof]) = integrate(t, p, v, a, j);
-            });
+            at_time(times[i], positions[i], velocities[i], accelerations[i]);
         }
     }
 
