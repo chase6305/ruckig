@@ -229,6 +229,34 @@ public:
         traj.resize(0);
 #endif
 
+        // Identical states on every axis need no elapsed time, even while moving.
+        // Handle the whole synchronized state here; an individual moving axis
+        // cannot hold its position while other axes complete a nonzero section.
+        bool identical_state = inp.control_interface == ControlInterface::Position && !inp.per_dof_control_interface
+            && inp.intermediate_positions.empty() && (!inp.minimum_duration || *inp.minimum_duration <= 0.0);
+        for (size_t dof = 0; identical_state && dof < degrees_of_freedom; ++dof) {
+            identical_state = std::isfinite(inp.current_position[dof]) && std::isfinite(inp.current_velocity[dof])
+                && std::isfinite(inp.current_acceleration[dof])
+                && inp.current_position[dof] == inp.target_position[dof]
+                && inp.current_velocity[dof] == inp.target_velocity[dof]
+                && inp.current_acceleration[dof] == inp.target_acceleration[dof];
+        }
+        if (identical_state) {
+            traj.duration = traj.cumulative_times[0] = 0.0;
+            for (size_t dof = 0; dof < degrees_of_freedom; ++dof) {
+                auto& p = traj.profiles[0][dof];
+                p = Profile{};
+                p.p.fill(inp.current_position[dof]);
+                p.v.fill(inp.current_velocity[dof]);
+                p.a.fill(inp.current_acceleration[dof]);
+                p.set_boundary(inp.current_position[dof], inp.current_velocity[dof], inp.current_acceleration[dof],
+                    inp.target_position[dof], inp.target_velocity[dof], inp.target_acceleration[dof]);
+                p.limits = Profile::ReachedLimits::NONE;
+                traj.independent_min_durations[dof] = 0.0;
+            }
+            return Result::Working;
+        }
+
         for (size_t dof = 0; dof < degrees_of_freedom; ++dof) {
             auto& p = traj.profiles[0][dof];
 

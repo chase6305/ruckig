@@ -29,6 +29,7 @@ void traj_at_time(const Trajectory& traj, double time, double* pos, double* vel,
 
 // InputParameter
 std::unique_ptr<InputParameter> input_new(size_t dofs) { return std::make_unique<InputParameter>(dofs); };
+size_t input_get_dofs(const InputParameter& input) { return input.degrees_of_freedom; }
 int32_t input_get_control_interface(const InputParameter& input) { return static_cast<int32_t>(input.control_interface); }
 void input_set_control_interface(InputParameter& input, int32_t v) { input.control_interface = static_cast<ruckig::ControlInterface>(v); }
 int32_t input_get_synchronization(const InputParameter& input) { return static_cast<int32_t>(input.synchronization); }
@@ -62,6 +63,7 @@ void input_set_intermediate_positions(InputParameter& input, const double* data,
     }
 }
 void input_clear_intermediate_positions(InputParameter& input) { input.intermediate_positions.clear(); }
+size_t input_get_intermediate_positions_count(const InputParameter& input) { return input.intermediate_positions.size(); }
 size_t input_get_intermediate_positions(const InputParameter& input, double* buf, size_t capacity) {
     size_t written = 0;
     for (auto& row : input.intermediate_positions) {
@@ -76,6 +78,11 @@ size_t input_get_intermediate_positions(const InputParameter& input, double* buf
 std::unique_ptr<OutputParameter> output_new_direct(size_t dofs) { return std::make_unique<OutputParameter>(dofs); };
 std::unique_ptr<OutputParameter> output_new(size_t dofs, size_t waypoints) { return std::make_unique<OutputParameter>(dofs, waypoints); };
 const Trajectory& output_get_trajectory(const OutputParameter& output) { return output.trajectory; }
+void output_invalidate_trajectory(OutputParameter& output) {
+    output.trajectory = Trajectory(output.trajectory.degrees_of_freedom);
+    output.new_calculation = false;
+    output.was_calculation_interrupted = false;
+}
 const std::vector<double>& output_get_new_position(const OutputParameter& output) { return output.new_position; }
 const std::vector<double>& output_get_new_velocity(const OutputParameter& output) { return output.new_velocity; }
 const std::vector<double>& output_get_new_acceleration(const OutputParameter& output) { return output.new_acceleration; }
@@ -92,5 +99,29 @@ std::unique_ptr<Ruckig> ruckig_new_offline(size_t dofs, size_t waypoints) { retu
 std::unique_ptr<Ruckig> ruckig_new(size_t dofs, double delta_time, size_t waypoints) { return std::make_unique<Ruckig>(dofs, delta_time, waypoints); }
 int ruckig_update(Ruckig& ruckig, const InputParameter& input, OutputParameter& output) { return static_cast<int>(ruckig.update(input, output)); }
 int ruckig_update_trajectory(Ruckig& ruckig, const Trajectory& trajectory, OutputParameter& output) { return static_cast<int>(ruckig.update(trajectory, output)); }
+int ruckig_update_current_trajectory(Ruckig& ruckig, OutputParameter& output) { return static_cast<int>(ruckig.update(output.trajectory, output)); }
 int ruckig_calculate(Ruckig& ruckig, const InputParameter& input, Trajectory& trajectory) { return static_cast<int>(ruckig.calculate(input, trajectory)); }
+int ruckig_calculate_waypoints(Ruckig& ruckig, const InputParameter& input, Trajectory& trajectory,
+    const double* velocities, size_t velocity_count, const double* accelerations, size_t acceleration_count) {
+    const size_t count = input.intermediate_positions.size();
+    const size_t dofs = input.degrees_of_freedom;
+    if (dofs == 0 || (velocity_count != 0 && velocity_count / dofs != count) || (acceleration_count != 0 && acceleration_count / dofs != count)
+        || velocity_count % dofs != 0 || acceleration_count % dofs != 0) {
+        trajectory = Trajectory(trajectory.degrees_of_freedom);
+        return ruckig::Result::ErrorInvalidInput;
+    }
+    std::vector<std::vector<double>> v, a;
+    for (size_t i = 0; i < count; ++i) {
+        if (velocity_count != 0) {
+            v.push_back(to_vec(velocities + i * dofs, dofs));
+        }
+        if (acceleration_count != 0) {
+            a.push_back(to_vec(accelerations + i * dofs, dofs));
+        }
+    }
+    return static_cast<int>(ruckig.calculate_waypoints(input, trajectory, v, a));
+}
+int ruckig_optimize_waypoints(Ruckig& ruckig, const InputParameter& input, Trajectory& trajectory, size_t max_iterations) {
+    return static_cast<int>(ruckig.optimize_waypoints(input, trajectory, max_iterations));
+}
 void ruckig_reset(Ruckig& ruckig) { ruckig.reset(); }

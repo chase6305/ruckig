@@ -1193,6 +1193,278 @@ TEST_CASE("position-second-random-3") {
 }
 
 
+TEST_CASE("coincident-extremal-roots") {
+    Ruckig<1> otg;
+    for (double sign: {-1.0, 1.0}) {
+        InputParameter<1> input;
+        input.current_position = {sign};
+        input.target_position = {sign * 2.0};
+        input.current_velocity = input.target_velocity = {sign * 1.8693742147505434};
+        input.current_acceleration = {sign * 1.0222554876329362};
+        input.target_acceleration = {sign * -1.0222554876329362};
+        input.max_velocity = input.max_acceleration = {2.0};
+        input.max_jerk = {4.0};
+        Trajectory<1> trajectory;
+        REQUIRE(otg.calculate(input, trajectory) == Result::Working);
+        CHECK(trajectory.get_duration() == doctest::Approx(0.5111277438164681).epsilon(1e-10));
+        double p = 0.0, v = 0.0, a = 0.0;
+        trajectory.at_time(trajectory.get_duration(), p, v, a);
+        CHECK(p == doctest::Approx(input.target_position[0]).epsilon(1e-9));
+        CHECK(v == doctest::Approx(input.target_velocity[0]).epsilon(1e-9));
+        CHECK(a == doctest::Approx(input.target_acceleration[0]).epsilon(1e-9));
+    }
+}
+
+
+TEST_CASE("identical-moving-state-needs-no-time") {
+    Ruckig<2> otg(0.01);
+    InputParameter<2> input;
+    input.current_position = input.target_position = {1.0, -2.0};
+    input.current_velocity = input.target_velocity = {0.75, -0.5};
+    input.current_acceleration = input.target_acceleration = {0.25, -0.125};
+    input.max_velocity = input.max_acceleration = {2.0, 2.0};
+    input.max_jerk = {4.0, 4.0};
+    Trajectory<2> trajectory;
+    REQUIRE(otg.calculate(input, trajectory) == Result::Working);
+    CHECK(trajectory.get_duration() == 0.0);
+    CHECK(trajectory.get_independent_min_durations() == std::array<double, 2>{0.0, 0.0});
+    std::array<double, 2> p, v, a;
+    trajectory.at_time(0.0, p, v, a);
+    CHECK(p == input.target_position);
+    CHECK(v == input.target_velocity);
+    CHECK(a == input.target_acceleration);
+    OutputParameter<2> output;
+    CHECK(otg.update(trajectory, output) == Result::Finished);
+    CHECK(output.time == 0.0);
+    CHECK(output.new_velocity == input.target_velocity);
+
+    input.minimum_duration = 4.0;
+    REQUIRE(otg.calculate(input, trajectory) == Result::Working);
+    CHECK(trajectory.get_duration() >= 4.0);
+    trajectory.at_time(trajectory.get_duration(), p, v, a);
+    for (size_t d = 0; d < 2; ++d) {
+        CHECK(p[d] == doctest::Approx(input.target_position[d]));
+        CHECK(v[d] == doctest::Approx(input.target_velocity[d]));
+        CHECK(a[d] == doctest::Approx(input.target_acceleration[d]));
+    }
+    input.minimum_duration.reset();
+    input.max_position = {0.5, 0.0};
+    CHECK(otg.calculate(input, trajectory) == Result::ErrorPositionalLimits);
+    CHECK(otg.update(trajectory, output) == Result::ErrorInvalidInput);
+}
+
+
+TEST_CASE("trajectory-sampling-requires-valid-state-and-time") {
+    Ruckig<1> otg;
+    InputParameter<1> input;
+    input.current_position = {0.0};
+    input.target_position = {1.0};
+    input.max_velocity = input.max_acceleration = input.max_jerk = {1.0};
+    Trajectory<1> trajectory;
+    double p = 0.0, v = 0.0, a = 0.0;
+    CHECK(trajectory.get_duration() == 0.0);
+    CHECK_THROWS_AS(trajectory.at_time(0.0, p, v, a), RuckigError);
+    CHECK_THROWS_AS(trajectory.get_profiles(), RuckigError);
+    CHECK_THROWS_AS(trajectory.get_intermediate_durations(), RuckigError);
+    CHECK_THROWS_AS(trajectory.get_independent_min_durations(), RuckigError);
+    CHECK_FALSE(trajectory.get_first_time_at_position(0, 0.0).has_value());
+    REQUIRE(otg.calculate(input, trajectory) == Result::Working);
+    for (const double time: {std::nan(""), std::numeric_limits<double>::infinity(), -std::numeric_limits<double>::infinity()}) {
+        CHECK_THROWS_AS(trajectory.at_time(time, p, v, a), RuckigError);
+    }
+    trajectory.at_time(-0.1, p, v, a);
+    CHECK(std::isfinite(p));
+    CHECK(std::isfinite(v));
+    CHECK(std::isfinite(a));
+    CHECK_FALSE(trajectory.get_first_time_at_position(0, std::nan("")).has_value());
+    input.max_position = {0.5};
+    CHECK(otg.calculate(input, trajectory) == Result::ErrorPositionalLimits);
+    CHECK_THROWS_AS(trajectory.at_time(0.0, p, v, a), RuckigError);
+    CHECK_FALSE(trajectory.get_first_time_at_position(0, 0.0).has_value());
+}
+
+
+TEST_CASE("trajectory-storage-dimensions-are-validated") {
+    Ruckig<> otg(2, 0.01), other(1, 0.01);
+    InputParameter<> input(2), wrong_input(1);
+    input.current_position = {0.0, 0.0};
+    input.target_position = {1.0, 1.0};
+    input.max_velocity = input.max_acceleration = input.max_jerk = {1.0, 1.0};
+    wrong_input.current_position = {0.0};
+    wrong_input.target_position = {1.0};
+    wrong_input.max_velocity = wrong_input.max_acceleration = wrong_input.max_jerk = {1.0};
+    OutputParameter<> output(2);
+    Trajectory<> wrong(1);
+    REQUIRE(otg.update(input, output) == Result::Working);
+    output.pass_to_input(input);
+    REQUIRE(other.calculate(wrong_input, wrong) == Result::Working);
+    output.trajectory = wrong;
+    output.new_calculation = true;
+    CHECK(otg.update(input, output) == Result::ErrorInvalidInput);
+    CHECK_FALSE(output.new_calculation);
+
+    wrong.degrees_of_freedom = 2;
+    std::vector<double> p(2), v(2), a(2);
+    std::vector<Bound> extrema(2);
+    CHECK_THROWS_AS(wrong.at_time(0.0, p, v, a), RuckigError);
+    CHECK_THROWS_AS(wrong.get_position_extrema(extrema), RuckigError);
+    CHECK_FALSE(wrong.get_first_time_at_position(1, 0.0).has_value());
+    CHECK(otg.calculate(input, wrong) == Result::ErrorInvalidInput);
+
+    Ruckig<1> fixed(0.01);
+    InputParameter<1> fixed_input;
+    fixed_input.current_position = {0.0};
+    fixed_input.target_position = {1.0};
+    fixed_input.max_velocity = fixed_input.max_acceleration = fixed_input.max_jerk = {1.0};
+    OutputParameter<1> fixed_output;
+    REQUIRE(fixed.update(fixed_input, fixed_output) == Result::Working);
+    fixed_output.pass_to_input(fixed_input);
+    fixed_output.trajectory.degrees_of_freedom = 2;
+    CHECK(fixed.update(fixed_input, fixed_output) == Result::ErrorInvalidInput);
+    double sp = 0.0, sv = 0.0, sa = 0.0;
+    CHECK_THROWS_AS(fixed_output.trajectory.at_time(0.0, sp, sv, sa), RuckigError);
+}
+
+
+TEST_CASE("waypoint-filter-respects-stationary-axes-and-shapes") {
+    Ruckig<> otg(2);
+    InputParameter<> input(2);
+    input.current_position = {0.0, 0.0};
+    input.target_position = {1.0, 0.0};
+    input.intermediate_positions = {{0.5, 10.0}};
+    CHECK(otg.filter_intermediate_positions(input, {0.1, 0.1}) == input.intermediate_positions);
+    input.intermediate_positions = {{0.5, 0.05}};
+    CHECK(otg.filter_intermediate_positions(input, {0.1, 0.1}).empty());
+    input.target_position = {-1.0, 0.0};
+    input.intermediate_positions = {{-0.5, 0.0}};
+    CHECK(otg.filter_intermediate_positions(input, {0.0, 0.0}).empty());
+    input.intermediate_positions = {{0.5, 0.0}};
+    CHECK(otg.filter_intermediate_positions(input, {0.1, 0.1}) == input.intermediate_positions);
+    input.target_position = {0.0, 0.0};
+    input.intermediate_positions = {{10.0, 0.0}};
+    CHECK(otg.filter_intermediate_positions(input, {0.1, 0.1}) == input.intermediate_positions);
+    CHECK_THROWS_AS(otg.filter_intermediate_positions(input, {}), RuckigError);
+    CHECK_THROWS_AS(otg.filter_intermediate_positions(input, {-0.1, 0.1}), RuckigError);
+    CHECK_THROWS_AS(otg.filter_intermediate_positions(input, {std::nan(""), 0.1}), RuckigError);
+    input.intermediate_positions[0] = {1.0};
+    CHECK_THROWS_AS(otg.filter_intermediate_positions(input, {0.1, 0.1}), RuckigError);
+    input.intermediate_positions = {{std::nan(""), 0.0}};
+    CHECK_THROWS_AS(otg.filter_intermediate_positions(input, {0.1, 0.1}), RuckigError);
+}
+
+
+TEST_CASE("constant-jerk-root-regressions") {
+    const double cases[][10] = {
+        {0.0, -2.0850355161874063e-13, 118.616146584562, 187.46063869767866, 294.78329096470617, 281.93180232186,
+            3455.0549787534787, 563.86360464372001, 110.95566291393718, 1.4719001396438314},
+        {3.155314916971538, 1.9990117600263974e-11, -113.82348475427857, -316.66694012340406, -369.88090913139985, -258.5351615575571,
+            4410.2693402580417, 517.07032311511421, 72.840531573419611, 1.9866916629708615},
+        {927128.67972676596, 6.7713971391177015e-08, -0.00046409091929022723, 927128.67971456447, 6.7713971391177015e-08, 0.00046409091929022723,
+            0.00046118371669927728, 0.00092818183858045446, 0.0023343967388862997, 0.39761100721177067},
+        {0.013967472830951747, -2.4918711163498024e-13, -5.5240543959232176e-15, 0.013967472830951257, -2.4918711163498024e-13, 5.5240543959232176e-15,
+            4.9840130271738365e-13, std::numeric_limits<double>::infinity(), 5.6343795521780221e-12, 0.0019608385785042978},
+        {0.0, 7.6011034658127291e-13 / 16, 1435411.6539722653 / 16, 2280801.3169312915 / 16, 3328582.401853486 / 16, 2880202.5819926639 / 16,
+            42085255.471448816 / 16, std::numeric_limits<double>::infinity(), 936608.97406142496 / 16, 1.5425764305410616},
+        {0.0, 0.0, 38.15356476767716, 6.759093744921358e-11, 7.181692293159091e-5, 38.153564767775883,
+            111019495.0686374, 76.30712953555177, 5.244824806997274e-5, 1.8822899e-6},
+        {0.0, 0.0, 0.0032415181449892984, 2.9516579557608209e-10, 1.3833194707271217e-6, 0.0032415237193457176,
+            3.2176418224019225, 0.0064830474386914352, 1.3062342718971396e-5, 0.00042675012738607781},
+    };
+    Ruckig<1> otg;
+    Trajectory<1> trajectory;
+    for (const auto& values: cases) {
+        InputParameter<1> input;
+        input.current_position = {values[0]};
+        input.current_velocity = {values[1]};
+        input.current_acceleration = {values[2]};
+        input.target_position = {values[3]};
+        input.target_velocity = {values[4]};
+        input.target_acceleration = {values[5]};
+        input.max_velocity = {values[6]};
+        input.max_acceleration = {values[7]};
+        input.max_jerk = {values[8]};
+        CAPTURE(input);
+        REQUIRE(otg.calculate(input, trajectory) == Result::Working);
+        // Small translated displacements lose some precision in their input coordinates.
+        CHECK(trajectory.get_duration() <= values[9] + 1e-5 * std::max(1.0, values[9]));
+    }
+}
+
+
+TEST_CASE("constant-jerk-feasibility-corpus") {
+    std::mt19937_64 rng(20261103);
+    std::uniform_real_distribution<double> unit(0.0, 1.0), signed_unit(-1.0, 1.0);
+    const auto logrange = [&](double lo, double hi) { return std::pow(10.0, lo + (hi - lo) * unit(rng)); };
+    Ruckig<1> otg;
+    Trajectory<1> trajectory;
+    for (size_t k = 0; k < 5000; ++k) {
+        const double time = logrange(-2.0, 1.0), max_jerk = logrange(-1.0, 2.0);
+        const double jerk = signed_unit(rng) > 0.0 ? max_jerk : -max_jerk;
+        const double position = k % 7 == 0 ? signed_unit(rng) * 10.0 : 0.0;
+        const double velocity = signed_unit(rng) * 3.0;
+        double acceleration = signed_unit(rng) * max_jerk * time;
+        if (k % 5 == 0) acceleration = -jerk * time / 2.0;
+        if (k % 11 == 0) acceleration = 0.0;
+        InputParameter<1> input;
+        input.current_position = {position};
+        input.current_velocity = {velocity};
+        input.current_acceleration = {acceleration};
+        input.target_acceleration = {acceleration + time * jerk};
+        input.target_velocity = {velocity + time * (acceleration + time * jerk / 2.0)};
+        input.target_position = {position + time * (velocity + time * (acceleration / 2.0 + time * jerk / 6.0))};
+        const double max_acceleration = 2.0 * std::max(std::abs(acceleration), std::abs(input.target_acceleration[0]));
+        input.max_jerk = {max_jerk};
+        input.max_velocity = {2.0 * std::max({std::abs(velocity), std::abs(input.target_velocity[0]),
+            std::abs(velocity - acceleration * acceleration / (2.0 * jerk))}) + max_acceleration * max_acceleration / max_jerk};
+        input.max_acceleration = {k % 3 == 0 ? std::numeric_limits<double>::infinity() : max_acceleration};
+        CAPTURE(k);
+        CAPTURE(input);
+        REQUIRE(input.validate<false>(true, true));
+        REQUIRE(otg.calculate(input, trajectory) == Result::Working);
+        CHECK(std::isfinite(trajectory.get_duration()));
+        double p = 0.0, v = 0.0, a = 0.0;
+        trajectory.at_time(trajectory.get_duration(), p, v, a);
+        CHECK(std::abs(p - input.target_position[0]) < 1e-8);
+        CHECK(std::abs(v - input.target_velocity[0]) < 1e-8);
+        CHECK(std::abs(a - input.target_acceleration[0]) < 1e-10);
+    }
+}
+
+
+TEST_CASE("degenerate-roots-preserve-synchronization-gaps") {
+    Ruckig<2> otg;
+    InputParameter<2> input;
+    const double scale = 1.0 / 128;
+    input.current_position = {0.0, 0.0};
+    input.current_velocity = {-2.0850355161874063e-13 * scale, 0.0};
+    input.current_acceleration = {118.616146584562 * scale, 0.0};
+    input.target_position = {187.46063869767866 * scale, 3.0};
+    input.target_velocity = {294.78329096470617 * scale, 0.0};
+    input.target_acceleration = {281.93180232186 * scale, 0.0};
+    input.max_velocity = {3455.0549787534787 * scale, 2.0};
+    input.max_acceleration = {563.86360464372001 * scale, 2.0};
+    input.max_jerk = {110.95566291393718 * scale, 4.0};
+    Trajectory<2> trajectory;
+    REQUIRE(otg.calculate(input, trajectory) == Result::Working);
+    CHECK(trajectory.get_duration() == doctest::Approx(5.7480639142342937));
+    const auto independent = trajectory.get_independent_min_durations();
+    CHECK(independent[0] == doctest::Approx(1.4719001396438314));
+    CHECK(independent[1] == doctest::Approx(3.0));
+
+    // Crossing zero acceleration does not imply a blocked interval after the minimum.
+    input.current_velocity = {0.25, 0.0};
+    input.current_acceleration = {-0.5, 0.0};
+    input.target_position = {1.0 / 6, 0.421875};
+    input.target_velocity = {0.25, 0.0};
+    input.target_acceleration = {0.5, 0.0};
+    input.max_velocity = {4.0, 2.0};
+    input.max_acceleration = {2.0, 2.0};
+    input.max_jerk = {1.0, 4.0};
+    REQUIRE(otg.calculate(input, trajectory) == Result::Working);
+    CHECK(trajectory.get_duration() == doctest::Approx(1.5));
+}
+
+
 int main(int argc, char** argv) {
     doctest::Context context;
 

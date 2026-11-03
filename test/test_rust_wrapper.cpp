@@ -23,5 +23,52 @@ int main() {
     for (size_t i = 0; result == ruckig::Result::Working && i < 100; ++i) {
         result = ruckig_update_trajectory(*executor, trajectory, output);
     }
-    return !(result == ruckig::Result::Finished && output.time == trajectory.get_duration());
+    if (!(result == ruckig::Result::Finished && output.time == trajectory.get_duration())) {
+        return 3;
+    }
+    input.intermediate_positions = {{0.5, 0.5}};
+    if (ruckig_calculate_waypoints(*otg, input, trajectory, nullptr, 0, nullptr, 0) != ruckig::Result::Working) {
+        return 4;
+    }
+    if (trajectory.get_profiles().size() != 2) {
+        return 5;
+    }
+    double velocities[] = {0.2, 0.2};
+    double accelerations[] = {0.0, 0.0};
+    if (ruckig_calculate_waypoints(*otg, input, trajectory, velocities, 2, accelerations, 2) != ruckig::Result::Working) {
+        return 6;
+    }
+    if (ruckig_calculate_waypoints(*otg, input, trajectory, velocities, 1, accelerations, 2) != ruckig::Result::ErrorInvalidInput) {
+        return 7;
+    }
+    InputParameter empty(0);
+    if (ruckig_update_trajectory(*executor, trajectory, output) != ruckig::Result::ErrorInvalidInput) {
+        return 9;
+    }
+    if (ruckig_calculate_waypoints(*otg, input, trajectory, nullptr, 0, nullptr, 0) != ruckig::Result::Working) {
+        return 10;
+    }
+    const double stopping_duration = trajectory.get_duration();
+    if (ruckig_optimize_waypoints(*otg, input, trajectory, 8) != ruckig::Result::Working || trajectory.get_duration() >= stopping_duration) {
+        return 11;
+    }
+    std::vector<double> p(2), v(2), a(2);
+    for (double time: {std::numeric_limits<double>::quiet_NaN(), std::numeric_limits<double>::infinity(), -std::numeric_limits<double>::infinity()}) {
+        try {
+            traj_at_time(trajectory, time, p.data(), v.data(), a.data(), 2);
+            return 12;
+        } catch (const ruckig::RuckigError&) {
+        }
+    }
+    traj_at_time(trajectory, 0.0, p.data(), v.data(), a.data(), 2);
+    if (p != input.current_position) {
+        return 13;
+    }
+    output_invalidate_trajectory(output);
+    try {
+        traj_at_time(output_get_trajectory(output), 0.0, p.data(), v.data(), a.data(), 2);
+        return 14;
+    } catch (const ruckig::RuckigError&) {
+    }
+    return ruckig_calculate_waypoints(*otg, empty, trajectory, nullptr, 0, nullptr, 0) == ruckig::Result::ErrorInvalidInput ? 0 : 8;
 }

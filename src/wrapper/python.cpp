@@ -44,7 +44,9 @@ limited by velocity, acceleration, and jerk constraints.";
         .value("Finished", Result::Finished)
         .value("Error", Result::Error)
         .value("ErrorInvalidInput", Result::ErrorInvalidInput)
+        .value("ErrorTrajectoryDuration", Result::ErrorTrajectoryDuration)
         .value("ErrorPositionalLimits", Result::ErrorPositionalLimits)
+        .value("ErrorZeroLimits", Result::ErrorZeroLimits)
         .value("ErrorExecutionTimeCalculation", Result::ErrorExecutionTimeCalculation)
         .value("ErrorSynchronizationCalculation", Result::ErrorSynchronizationCalculation)
         .export_values();
@@ -157,8 +159,8 @@ limited by velocity, acceleration, and jerk constraints.";
         .def(nb::init<size_t, double>(), "dofs"_a, "delta_time"_a)
 #if defined WITH_CLOUD_CLIENT
         .def(nb::init<size_t, double, size_t>(), "dofs"_a, "delta_time"_a, "max_number_of_waypoints"_a=0)
-        .def("filter_intermediate_positions", &RuckigThrow<DynamicDOFs>::filter_intermediate_positions, "input"_a, "threshold_distance"_a)
 #endif
+        .def("filter_intermediate_positions", &RuckigThrow<DynamicDOFs>::filter_intermediate_positions, "input"_a, "threshold_distance"_a)
         .def_ro("max_number_of_waypoints", &RuckigThrow<DynamicDOFs>::max_number_of_waypoints)
         .def_ro("degrees_of_freedom", &RuckigThrow<DynamicDOFs>::degrees_of_freedom)
         .def_rw("delta_time", &RuckigThrow<DynamicDOFs>::delta_time)
@@ -166,6 +168,9 @@ limited by velocity, acceleration, and jerk constraints.";
         .def("validate_input", &RuckigThrow<DynamicDOFs>::validate_input<true>, "input"_a, "check_current_state_within_limits"_a=false, "check_target_state_within_limits"_a=true)
         .def("calculate", static_cast<Result (RuckigThrow<DynamicDOFs>::*)(const InputParameter<>&, Trajectory<>&)>(&RuckigThrow<DynamicDOFs>::calculate), "input"_a, "trajectory"_a)
         .def("calculate", static_cast<Result (RuckigThrow<DynamicDOFs>::*)(const InputParameter<>&, Trajectory<>&, bool&)>(&RuckigThrow<DynamicDOFs>::calculate), "input"_a, "trajectory"_a, "was_interrupted"_a)
+        .def("calculate_waypoints", &RuckigThrow<DynamicDOFs>::calculate_waypoints, "input"_a, "trajectory"_a,
+            "intermediate_velocities"_a=std::vector<std::vector<double>>{}, "intermediate_accelerations"_a=std::vector<std::vector<double>>{})
+        .def("optimize_waypoints", &RuckigThrow<DynamicDOFs>::optimize_waypoints, "input"_a, "trajectory"_a, "max_iterations"_a=8)
         .def("update", static_cast<Result (RuckigThrow<DynamicDOFs>::*)(const InputParameter<>&, OutputParameter<>&)>(&RuckigThrow<DynamicDOFs>::update), "input"_a, "output"_a)
         .def("update", static_cast<Result (RuckigThrow<DynamicDOFs>::*)(const Trajectory<>&, OutputParameter<>&)>(&RuckigThrow<DynamicDOFs>::update), "trajectory"_a, "output"_a);
 

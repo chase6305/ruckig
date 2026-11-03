@@ -29,6 +29,10 @@ path = "examples/02_position_offline.rs"
 name = "05_velocity"
 path = "examples/05_velocity.rs"
 
+[[example]]
+name = "17_local_waypoints"
+path = "examples/17_local_waypoints.rs"
+
 [dependencies]
 cxx = "1.0"
 

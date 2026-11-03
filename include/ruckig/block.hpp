@@ -91,6 +91,10 @@ public:
                 remove_profile<N>(valid_profiles, valid_profile_counter, 3);
             } else if (std::abs(valid_profiles[0].t_sum.back() - valid_profiles[3].t_sum.back()) < 256 * std::numeric_limits<double>::epsilon() && valid_profiles[0].direction != valid_profiles[3].direction) {
                 remove_profile<N>(valid_profiles, valid_profile_counter, 3);
+            } else if (std::abs(valid_profiles[1].t_sum.back() - valid_profiles[3].t_sum.back()) < 1e-12 * std::max(1.0, valid_profiles[1].t_sum.back()) && valid_profiles[1].direction != valid_profiles[3].direction) {
+                // Both directions can produce the same short and long solutions.
+                // Keep both short endpoints so that the blocked gap is retained.
+                remove_profile<N>(valid_profiles, valid_profile_counter, 3);
             } else {
                 return false;
             }

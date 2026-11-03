@@ -117,10 +117,61 @@ As soon as intermediate positions are given, the Ruckig Community Version switch
 
 When using *intermediate positions*, both the underlying motion planning problem as well as its calculation changes significantly. In particular, there are some fundamental limitations for jerk-limited online trajectory generation regarding the usage of waypoints. Please find more information about these limitations [here](https://docs.ruckig.com/md_pages_2__intermediate__waypoints.html), and in general we recommend to use
 ```.cpp
-input.intermediate_positions = ruckig.filter_intermediate_positions(input.intermediate_positions, {0.1, ...});
+input.intermediate_positions = ruckig.filter_intermediate_positions(input, {0.1, ...});
 ```
 to filter waypoints according to a (high) threshold distance. Setting *interrupt_calculation_duration* makes sure to be real-time capable by refining the solution in the next control invocation. Note that this is a soft interruption of the calculation. Currently, no minimum or discrete durations are supported when using intermediate positions.
 
+
+### Fully Local Multi-Waypoint Calculation
+
+This fork provides an explicit offline `calculate_waypoints` API, available with `BUILD_CLOUD_CLIENT=OFF` or `ON`. It never calls the cloud service. Set the intermediate positions as usual, then calculate into an ordinary `Trajectory`:
+
+```python
+otg = Ruckig(2, 0.001)
+inp = InputParameter(2)
+inp.current_position = [0.0, 0.0]
+inp.target_position = [3.0, 1.5]
+inp.max_velocity = [2.0, 2.0]
+inp.max_acceleration = [2.0, 2.0]
+inp.max_jerk = [4.0, 4.0]
+inp.intermediate_positions = [[1.0, 0.5], [2.0, 1.0]]
+out = OutputParameter(2)
+result = otg.calculate_waypoints(inp, out.trajectory)
+```
+
+By default, velocity and acceleration are zero at every intermediate point. To prescribe pass-through states, supply matching arrays:
+
+```python
+result = otg.calculate_waypoints(
+    inp, out.trajectory,
+    intermediate_velocities=[[0.5, 0.25], [0.5, 0.25]],
+    intermediate_accelerations=[[0.0, 0.0], [0.0, 0.0]],
+)
+```
+
+C++ uses the same method and arguments. Rust provides `calculate_waypoints` and `calculate_waypoints_with_states`. Each omitted state array defaults to zero; non-empty arrays must have exactly one vector per intermediate point and one value per DoF. Invalid or infeasible specified states return an error rather than being replaced with stops. Consecutive identical position/velocity/acceleration states share the same time, including when the velocity or acceleration is nonzero. Equal positions with different velocities or accelerations still require a nonzero transition.
+
+To automatically select intermediate velocities and accelerations from just the position list, use:
+
+```python
+result = otg.optimize_waypoints(inp, out.trajectory, max_iterations=8)
+```
+
+C++ provides the same method, and Rust uses `optimize_waypoints(&mut input, &mut trajectory, 8)`. The optimizer first tries states sampled from endpoint trajectories, checking that every waypoint is visited in order on all axes and re-solving each segment under the original limits. This preserves cruise speed on densely sampled straight routes; refinement stops early when a feasible chain reaches the unconstrained endpoint duration within numerical tolerance. For curved routes, additional seeds use the full path's chord lengths, tangents and curvature to choose a common timing. Consecutive identical intermediate points share one optimized state and retain separate section entries at the same time. It also evaluates stopping, geometry-based, and endpoint-motion seeds, then performs bounded local refinement. Each trial validates arrival/departure feasibility, solves the two affected adjacent segments, and checks the existing kinematic and global position limits. Only a strictly shorter feasible trial replaces the current solution. When the stopping baseline is feasible, the returned trajectory is never longer. Endpoint-motion seeds can also find feasible chains in some cases where stopping at the intermediate points is infeasible.
+
+`max_iterations` defaults to 8, is limited to 64, and controls the refinement sweeps per seed. When the curved-path seed improves the initial solution, both it and the original seed are refined and the shorter result is retained. This can require about twice the refinement work. Zero requests only the stopping baseline. Failed trial states are handled internally, including in Python; if no seed is feasible, the method returns an error and the output trajectory remains invalid. The bounded heuristic search can fail on a feasible problem and does not prove infeasibility. This is an offline operation that allocates memory; refinement solves a bounded number of segment pairs per waypoint and DoF in each sweep.
+
+Automatic states may still reach zero velocity at reversals or repeated coordinates. Local refinement restricts monotone coordinates to velocities in the direction of both neighboring displacements; reversing coordinates use zero velocity at the turning point, with acceleration selected by the search. Inspect the selected states with `trajectory.at_time(t)` at the intermediate durations. Use `calculate_waypoints` to retain explicitly prescribed states; `optimize_waypoints` chooses them afresh. Run `python test/benchmark_waypoints.py` with the built Python module to compare stopping/automatic durations and planning times on fixed straight, curved, and reversing routes.
+
+`filter_intermediate_positions(input, threshold_distance)` is also fully local in C++ and Python, with either cloud configuration. Thresholds must contain one finite nonnegative distance per DoF. Filtering checks every axis, including coordinates that are equal at the candidate segment's endpoints, and retains points that exceed the specified deviation.
+
+After checking the result, replay using `otg.update(out.trajectory, out)`. This form avoids copying the complete chain on every cycle. In Rust, load the trajectory and advance the first cycle with `update_trajectory(&trajectory, &mut output)`, then use `update_current_trajectory(&mut output)` for subsequent cycles to reuse the stored chain and state buffers. No `pass_to_input` call is required for offline replay. For each new replay, calculate into a fresh `OutputParameter` (or reset its `time` and `new_section` first in C++). Examples are provided in `examples/17_local_waypoints.cpp`, `.py`, and `.rs`.
+
+The result supports ordinary time sampling, batch sampling, section indices, position extrema, and position-crossing queries on the complete timeline. Sampling requires a successfully calculated trajectory and finite times; C++/Python reject invalid sampling with `RuckigError`, and Rust `at_time` panics. Finite times outside the timeline retain the existing extrapolation behavior; offline replay clamps to the terminal state. Reading profiles/extrema before a complete calculation also raises `RuckigError`; metadata from a state-to-state calculation rejected only by position bounds remains available for diagnosis. `intermediate_durations` includes every section end and the final duration; `independent_min_durations` sums the per-axis minimum durations of all sections. Metadata getters return `std::vector` in both cloud configurations. The fixed single-section storage is retained when the cloud client is disabled; extra section storage is allocated only for local chains.
+
+This initial implementation requires position control, all axes enabled, finite jerk limits, and global time or phase synchronization. Global position bounds are checked on every segment. Global minimum/discrete duration, per-section limits/durations, per-axis control/synchronization overrides, and interruption are unsupported and are rejected. Computation allocates memory and is intended to run outside the real-time loop.
+
+`calculate_waypoints` optimizes each segment for the caller's fixed states (or zero by default); `optimize_waypoints` additionally searches the intermediate states to reduce total duration. Neither API guarantees a globally shortest multi-waypoint trajectory. Position, velocity, and acceleration match at joins within the existing solver tolerances; jerk may jump within its limits. Passing through joint-space points does not guarantee following the original geometric path or avoiding obstacles. The ordinary `calculate`/online-input API retains its existing cloud routing for intermediate positions.
 
 ### Input Parameter
 
@@ -259,7 +310,7 @@ The Community version checks `min_position` and `max_position` locally after cal
 
 If the calculated motion crosses a bound, `calculate` or online `update` returns `Result::ErrorPositionalLimits`. Online update emits no new state for the rejected motion; it retries planning on the next call. A rejected trajectory cannot be used with offline `update`. Both online and offline stepping stop at the terminal time so a final nonzero velocity cannot cause an extra control-cycle extrapolation.
 
-This is a feasibility check of the generated motion: it does not search for a different, slower trajectory that avoids an overshoot. Callers must handle a negative result before using the output. Position bounds default to infinity, so existing unconstrained inputs retain their motion profiles. Per-section position bounds, local multi-waypoint optimization, predictive tracking, speed control, and interruptible optimization remain outside this implementation. This fork implements the local features using the existing MIT-licensed solver and analytical integration; it contains no Ruckig Pro source code.
+This is a feasibility check of the generated motion: it does not search for a different, slower trajectory that avoids an overshoot. Callers must handle a negative result before using the output. Position bounds default to infinity, so existing unconstrained inputs retain their motion profiles. The waypoint optimizer can explore different intermediate states, but does not replace the underlying single-segment positional feasibility check with a position-constrained solver. Per-section position bounds, predictive tracking, speed control, and interruptible optimization remain outside this implementation. This fork implements the local features using the existing MIT-licensed solver and analytical integration; it contains no Ruckig Pro source code.
 
 
 ### Tracking Interface
