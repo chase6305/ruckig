@@ -345,3 +345,91 @@ TEST_CASE("automatic-validation-and-invalidation") {
     RuckigThrow<0> throwing(2, 0.01);
     CHECK_THROWS_AS(throwing.optimize_waypoints(input, trajectory, 65), RuckigError);
 }
+
+TEST_CASE("short-saturated-jerk-sections") {
+    Ruckig<1> otg;
+    for (double sign: {-1.0, 1.0}) {
+        auto input = make_input<1>();
+        input.target_position = {sign * 3.0};
+        input.min_position = {-4.0};
+        Trajectory<1> reference, chain;
+        REQUIRE(otg.calculate(input, reference) == Result::Working);
+        std::vector<std::array<double, 1>> velocities, accelerations;
+        std::vector<double> crossings;
+        for (size_t i = 1; i < 20; ++i) {
+            const double position = sign * 3.0 * i / 20;
+            const auto time = reference.get_first_time_at_position(0, position);
+            REQUIRE(time.has_value());
+            double p = 0.0, v = 0.0, a = 0.0;
+            reference.at_time(*time, p, v, a);
+            input.intermediate_positions.push_back({position});
+            velocities.push_back({v});
+            accelerations.push_back({a});
+            crossings.push_back(*time);
+        }
+        REQUIRE(otg.calculate_waypoints(input, chain, velocities, accelerations) == Result::Working);
+        CHECK(chain.get_duration() == doctest::Approx(reference.get_duration()).epsilon(1e-9));
+        CHECK(chain.get_independent_min_durations()[0] == doctest::Approx(reference.get_duration()).epsilon(1e-9));
+        const auto times = chain.get_intermediate_durations();
+        for (size_t i = 0; i < crossings.size(); ++i) {
+            CHECK(times[i] == doctest::Approx(crossings[i]).epsilon(1e-9));
+        }
+        check_sampled_limits(input, chain);
+    }
+}
+
+TEST_CASE("automatic-dense-straight-waypoints") {
+    Ruckig<> otg(6);
+    auto input = make_input<0>(6);
+    const std::array<double, 6> coefficients{1.0, 0.8, 0.6, -0.4, -0.2, 0.0};
+    for (size_t d = 0; d < 6; ++d) {
+        input.target_position[d] = 3.0 * coefficients[d];
+        input.min_position[d] = -4.0;
+    }
+    Trajectory<> endpoint(6), optimized(6);
+    REQUIRE(otg.calculate(input, endpoint) == Result::Working);
+    for (size_t segments: {3, 20, 200}) {
+        input.intermediate_positions.clear();
+        for (size_t i = 1; i < segments; ++i) {
+            auto point = input.target_position;
+            for (double& p: point) {
+                p *= static_cast<double>(i) / segments;
+            }
+            input.intermediate_positions.push_back(point);
+        }
+        REQUIRE(otg.optimize_waypoints(input, optimized) == Result::Working);
+        CHECK(optimized.get_duration() == doctest::Approx(endpoint.get_duration()).epsilon(1e-8));
+        const auto times = optimized.get_intermediate_durations();
+        REQUIRE(times.size() == segments);
+        auto p = input.current_position, v = p, a = p;
+        for (size_t i = 0; i < segments - 1; ++i) {
+            optimized.at_time(times[i], p, v, a);
+            for (size_t d = 0; d < 6; ++d) {
+                CHECK(p[d] == doctest::Approx(input.intermediate_positions[i][d]).epsilon(1e-8));
+            }
+            CHECK(v[0] > 0.0);
+        }
+        check_sampled_limits(input, optimized);
+    }
+}
+
+TEST_CASE("automatic-reference-must-visit-all-coordinates") {
+    Ruckig<2> otg;
+    auto input = make_input<2>();
+    input.target_position = {3.0, 1.5};
+    input.intermediate_positions = {{0.4, 0.2}, {0.8, 0.6}, {1.4, 0.4}, {2.0, 0.8}};
+    Trajectory<2> baseline, optimized;
+    REQUIRE(otg.calculate_waypoints(input, baseline) == Result::Working);
+    REQUIRE(otg.optimize_waypoints(input, optimized) == Result::Working);
+    CHECK(optimized.get_duration() <= baseline.get_duration());
+    const auto times = optimized.get_intermediate_durations();
+    REQUIRE(times.size() == 5);
+    std::array<double, 2> p, v, a;
+    for (size_t i = 0; i < input.intermediate_positions.size(); ++i) {
+        optimized.at_time(times[i], p, v, a);
+        for (size_t d = 0; d < 2; ++d) {
+            CHECK(p[d] == doctest::Approx(input.intermediate_positions[i][d]).epsilon(1e-8));
+        }
+    }
+    check_sampled_limits(input, optimized);
+}

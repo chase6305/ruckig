@@ -160,6 +160,23 @@ class WrapperRegressionTest(unittest.TestCase):
         self.assertEqual(otg.optimize_waypoints(self.input, trajectory), Result.Working)
         self.assertAlmostEqual(trajectory.duration, 2.0)
 
+    def test_dense_waypoints_keep_cruise_speed(self):
+        inp = InputParameter(2)
+        inp.current_position = [0.0, 0.0]
+        inp.target_position = [3.0, -1.5]
+        inp.max_velocity = inp.max_acceleration = [2.0, 2.0]
+        inp.max_jerk = [4.0, 4.0]
+        inp.intermediate_positions = [[3.0 * i / 20, -1.5 * i / 20] for i in range(1, 20)]
+        trajectory = Trajectory(2)
+        self.assertEqual(Ruckig(2).optimize_waypoints(inp, trajectory), Result.Working)
+        self.assertAlmostEqual(trajectory.duration, 3.0)
+        self.assertEqual(len(trajectory.intermediate_durations), 20)
+        for point, time in zip(inp.intermediate_positions, trajectory.intermediate_durations):
+            p, v, _ = trajectory.at_time(time)
+            self.assertAlmostEqual(p[0], point[0])
+            self.assertAlmostEqual(p[1], point[1])
+            self.assertGreater(v[0], 0.1)
+
 
 if __name__ == '__main__':
     unittest.main()

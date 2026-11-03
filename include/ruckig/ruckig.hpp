@@ -453,6 +453,65 @@ public:
                 found = true;
             }
         };
+        // An endpoint trajectory may already visit every waypoint in order. Its
+        // states avoid slowing down merely because a straight route is sampled densely.
+        auto reference_input = input;
+        reference_input.intermediate_positions.clear();
+        auto reference = make_trajectory();
+        double lower_bound = 0.0;
+        size_t crossing_dof = 0;
+        double largest_span = 0.0;
+        for (size_t d = 0; d < degrees_of_freedom; ++d) {
+            reference_input.min_position[d] = -std::numeric_limits<double>::infinity();
+            reference_input.max_position[d] = std::numeric_limits<double>::infinity();
+            double span = std::abs(input.target_position[d] - input.current_position[d]);
+            for (const auto& point: input.intermediate_positions) {
+                span = std::max(span, std::abs(point[d] - input.current_position[d]));
+            }
+            if (span > largest_span) {
+                crossing_dof = d;
+                largest_span = span;
+            }
+        }
+        States v_seed(count, zero), a_seed(count, zero);
+        auto p_sample = zero;
+        for (const auto synchronization: {Synchronization::Time, Synchronization::Phase}) {
+            reference_input.synchronization = synchronization;
+            if (evaluator.calculate(reference_input, reference) != Result::Working) {
+                continue;
+            }
+            if (synchronization == Synchronization::Time) {
+                lower_bound = reference.duration;
+            }
+            double time = 0.0;
+            bool visits_all = true;
+            for (size_t i = 0; i < count; ++i) {
+                const auto crossing = reference.get_first_time_at_position(crossing_dof, input.intermediate_positions[i][crossing_dof], time);
+                if (!crossing || *crossing > reference.duration) {
+                    visits_all = false;
+                    break;
+                }
+                time = *crossing;
+                reference.at_time(time, p_sample, v_seed[i], a_seed[i]);
+                for (size_t d = 0; d < degrees_of_freedom; ++d) {
+                    if (std::abs(p_sample[d] - input.intermediate_positions[i][d]) > 1e-8) {
+                        visits_all = false;
+                        break;
+                    }
+                }
+                if (!visits_all) {
+                    break;
+                }
+            }
+            if (visits_all) {
+                // Re-solve every segment and enforce the original position bounds.
+                try_seed(v_seed, a_seed);
+                if (found && lower_bound > 0.0 && best.duration <= lower_bound + 1e-9 * std::max(1.0, lower_bound)) {
+                    trajectory = std::move(best);
+                    return Result::Working;
+                }
+            }
+        }
         // Joint seeds avoid plateaus where moving only one synchronized axis cannot help.
         for (double scale: {0.25, 0.5, 1.0}) {
             States v(count, zero), a(count, zero);
@@ -464,7 +523,6 @@ public:
             try_seed(v, a);
         }
         // Endpoint motion provides another seed, including some zero-jerk constant-state cases.
-        States v_seed(count, zero), a_seed(count, zero);
         for (size_t i = 0; i < count; ++i) {
             const double fraction = static_cast<double>(i + 1) / (count + 1);
             for (size_t d = 0; d < degrees_of_freedom; ++d) {
@@ -504,11 +562,13 @@ public:
         auto left_trial = make_trajectory(), right_trial = make_trajectory();
         auto state_input = input;
         state_input.intermediate_positions.clear();
+        auto old_v = zero, old_a = zero;
         const auto try_state = [&](size_t i, const Vector<double>& v, const Vector<double>& a) {
             if (v == velocities[i] && a == accelerations[i]) {
                 return;
             }
-            const auto old_v = velocities[i], old_a = accelerations[i];
+            old_v = velocities[i];
+            old_a = accelerations[i];
             velocities[i] = v;
             accelerations[i] = a;
             for (size_t d = 0; d < degrees_of_freedom; ++d) {
@@ -529,11 +589,13 @@ public:
             velocities[i] = old_v;
             accelerations[i] = old_a;
         };
+        auto v = zero, a = zero;
         for (size_t iteration = 0; iteration < max_iterations; ++iteration) {
             const double step = std::ldexp(0.5, -static_cast<int>(iteration));
             for (size_t i = 0; i < count; ++i) {
                 for (double sign: {-1.0, 1.0}) {
-                    auto v = velocities[i], a = accelerations[i];
+                    v = velocities[i];
+                    a = accelerations[i];
                     for (size_t d = 0; d < degrees_of_freedom; ++d) {
                         v[d] = std::clamp(v[d] + sign * step * direction[i][d] * velocity_scale[i][d], v_lower[i][d], v_upper[i][d]);
                     }
@@ -547,7 +609,8 @@ public:
                 }
                 for (size_t d = 0; d < degrees_of_freedom; ++d) {
                     for (double sign: {-1.0, 1.0}) {
-                        auto v = velocities[i], a = accelerations[i];
+                        v = velocities[i];
+                        a = accelerations[i];
                         v[d] = std::clamp(v[d] + sign * step * velocity_scale[i][d], v_lower[i][d], v_upper[i][d]);
                         try_state(i, v, a);
                         v = velocities[i];
