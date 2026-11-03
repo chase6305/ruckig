@@ -191,7 +191,7 @@ public:
             }
         }
 
-        if (delta_time <= 0.0 && input.duration_discretization != DurationDiscretization::Continuous) {
+        if ((!std::isfinite(delta_time) || delta_time <= 0.0) && input.duration_discretization != DurationDiscretization::Continuous) {
             if constexpr (throw_validation_error) {
                 throw RuckigError("delta time (control rate) parameter " + std::to_string(delta_time) + " should be larger than zero.");
             }
@@ -209,6 +209,8 @@ public:
 
     //! Calculate a new trajectory for the given input and check for interruption
     Result calculate(const InputParameter<DOFs, CustomVector>& input, Trajectory<DOFs, CustomVector>& trajectory, bool& was_interrupted) {
+        current_input_initialized = false;
+        trajectory.calculated = false;
         if (degrees_of_freedom != trajectory.degrees_of_freedom) {
             if constexpr (throw_error) {
                 throw RuckigError("mismatch in degrees of freedom (vector size).");
@@ -219,7 +221,45 @@ public:
             return Result::ErrorInvalidInput;
         }
 
-        return calculator.template calculate<throw_error>(input, trajectory, delta_time, was_interrupted);
+        const auto result = calculator.template calculate<throw_error>(input, trajectory, delta_time, was_interrupted);
+        if (result != Result::Working) {
+            return result;
+        }
+        if (!trajectory.check_position_limits(input.min_position, input.max_position)) {
+            return Result::ErrorPositionalLimits;
+        }
+        trajectory.calculated = true;
+        return result;
+    }
+
+    //! Advance a previously calculated trajectory, clamping at its terminal state.
+    Result update(const Trajectory<DOFs, CustomVector>& trajectory, OutputParameter<DOFs, CustomVector>& output) {
+        const auto start = std::chrono::steady_clock::now();
+        output.new_calculation = false;
+        if (!trajectory.calculated || degrees_of_freedom != trajectory.degrees_of_freedom
+            || degrees_of_freedom != output.degrees_of_freedom
+            || output.new_position.size() != degrees_of_freedom || output.new_velocity.size() != degrees_of_freedom
+            || output.new_acceleration.size() != degrees_of_freedom || output.new_jerk.size() != degrees_of_freedom
+            || !std::isfinite(delta_time) || delta_time <= 0.0
+            || !std::isfinite(output.time) || output.time < 0.0) {
+            if constexpr (throw_error) {
+                throw RuckigError("offline update requires a calculated trajectory, matching vector sizes, a positive finite control cycle, and a non-negative finite time.");
+            }
+            return Result::ErrorInvalidInput;
+        }
+        // Preserve the complete trajectory in the output, including when it aliases the argument.
+        if (&trajectory != &output.trajectory) {
+            output.trajectory = trajectory;
+        }
+        const size_t old_section = output.new_section;
+        output.time = std::min(output.time + delta_time, trajectory.get_duration());
+        trajectory.at_time(output.time, output.new_position, output.new_velocity, output.new_acceleration, output.new_jerk, output.new_section);
+        output.did_section_change = output.new_section > old_section;
+        output.was_calculation_interrupted = false;
+        output.calculation_duration = std::chrono::duration<double, std::micro>(std::chrono::steady_clock::now() - start).count();
+        // A later online update must replan from its supplied input.
+        current_input_initialized = false;
+        return output.time >= trajectory.get_duration() ? Result::Finished : Result::Working;
     }
 
     //! Get the next output state (with step delta_time) along the calculated trajectory for the given input
@@ -237,10 +277,21 @@ public:
 
         output.new_calculation = false;
 
+        if (!std::isfinite(delta_time) || delta_time <= 0.0
+            || !std::isfinite(output.time) || output.time < 0.0
+            || output.new_position.size() != degrees_of_freedom || output.new_velocity.size() != degrees_of_freedom
+            || output.new_acceleration.size() != degrees_of_freedom || output.new_jerk.size() != degrees_of_freedom) {
+            if constexpr (throw_error) {
+                throw RuckigError("online update requires matching vector sizes, a positive finite control cycle, and a non-negative finite time.");
+            }
+            return Result::ErrorInvalidInput;
+        }
+
         Result result {Result::Working};
-        if (!current_input_initialized || input != current_input) {
+        if (!current_input_initialized || !output.trajectory.calculated || input != current_input) {
             result = calculate(input, output.trajectory, output.was_calculation_interrupted);
-            if (result != Result::Working && result != Result::ErrorPositionalLimits) {
+            if (result != Result::Working) {
+                current_input_initialized = false;
                 return result;
             }
 
@@ -251,7 +302,7 @@ public:
         }
 
         const size_t old_section = output.new_section;
-        output.time += delta_time;
+        output.time = std::min(output.time + delta_time, output.trajectory.get_duration());
         output.trajectory.at_time(output.time, output.new_position, output.new_velocity, output.new_acceleration, output.new_jerk, output.new_section);
         output.did_section_change = (output.new_section > old_section);  // Report only forward section changes
 
@@ -260,7 +311,7 @@ public:
 
         output.pass_to_input(current_input);
 
-        if (output.time > output.trajectory.get_duration()) {
+        if (output.time >= output.trajectory.get_duration()) {
             return Result::Finished;
         }
 

@@ -91,5 +91,6 @@ std::unique_ptr<Ruckig> ruckig_new_direct(size_t dofs, double delta_time) { retu
 std::unique_ptr<Ruckig> ruckig_new_offline(size_t dofs, size_t waypoints) { return std::make_unique<Ruckig>(dofs, -1.0, waypoints); }
 std::unique_ptr<Ruckig> ruckig_new(size_t dofs, double delta_time, size_t waypoints) { return std::make_unique<Ruckig>(dofs, delta_time, waypoints); }
 int ruckig_update(Ruckig& ruckig, const InputParameter& input, OutputParameter& output) { return static_cast<int>(ruckig.update(input, output)); }
+int ruckig_update_trajectory(Ruckig& ruckig, const Trajectory& trajectory, OutputParameter& output) { return static_cast<int>(ruckig.update(trajectory, output)); }
 int ruckig_calculate(Ruckig& ruckig, const InputParameter& input, Trajectory& trajectory) { return static_cast<int>(ruckig.calculate(input, trajectory)); }
 void ruckig_reset(Ruckig& ruckig) { ruckig.reset(); }

@@ -28,10 +28,12 @@ class Trajectory {
 
     friend class TargetCalculator<DOFs, CustomVector>;
     friend class WaypointsCalculator<DOFs, CustomVector>;
+    template<size_t, template<class, size_t> class, bool> friend class Ruckig;
 
     Container<Vector<Profile>> profiles;
 
     double duration {0.0};
+    bool calculated {false};
     Container<double> cumulative_times;
 
     Vector<double> independent_min_durations;
@@ -135,6 +137,47 @@ class Trajectory {
 
             set_integrate(dof, t_diff_dof, p.p[index_dof], p.v[index_dof], p.a[index_dof], p.j[index_dof]);
         }
+    }
+
+    Bound get_position_extrema_for_dof(size_t dof) const {
+        Bound extrema {std::numeric_limits<double>::infinity(), -std::numeric_limits<double>::infinity(), 0.0, 0.0};
+        double section_start = 0.0;
+        for (size_t section = 0; section < profiles.size(); ++section) {
+            const auto& profile = profiles[section][dof];
+            auto bound = profile.get_position_extrema();
+            const double profile_end = profile.brake.duration + profile.t_sum.back();
+            const double tail_duration = cumulative_times[section] - section_start - profile_end;
+            if (tail_duration > 0.0) {
+                // Unsynchronized and disabled axes continue at constant acceleration.
+                Profile::check_step_for_position_extremum(profile_end, tail_duration,
+                    profile.p.back(), profile.v.back(), profile.a.back(), 0.0, bound);
+            }
+            if (bound.min < extrema.min) {
+                extrema.min = bound.min;
+                extrema.t_min = section_start + bound.t_min;
+            }
+            if (bound.max > extrema.max) {
+                extrema.max = bound.max;
+                extrema.t_max = section_start + bound.t_max;
+            }
+            section_start = cumulative_times[section];
+        }
+        return extrema;
+    }
+
+    bool check_position_limits(const Vector<double>& min_position, const Vector<double>& max_position) const {
+        constexpr double position_tolerance = 1e-8;
+        for (size_t dof = 0; dof < degrees_of_freedom; ++dof) {
+            if (std::isinf(min_position[dof]) && std::isinf(max_position[dof])) {
+                continue;
+            }
+            const auto bound = get_position_extrema_for_dof(dof);
+            if (!std::isfinite(bound.min) || !std::isfinite(bound.max)
+                || bound.min < min_position[dof] - position_tolerance || bound.max > max_position[dof] + position_tolerance) {
+                return false;
+            }
+        }
+        return true;
     }
 
 public:
@@ -275,22 +318,11 @@ public:
 
     //! Get the min/max values of the position for each DoF
     void get_position_extrema(CustomVector<Bound, DOFs>& position_extrema) const {
-        for (size_t dof = 0; dof < degrees_of_freedom; ++dof) {
-            position_extrema[dof] = profiles[0][dof].get_position_extrema();
+        if (position_extrema.size() != degrees_of_freedom) {
+            throw RuckigError("mismatch in degrees of freedom (vector size).");
         }
-
-        for (size_t i = 1; i < profiles.size(); ++i) {
-            for (size_t dof = 0; dof < degrees_of_freedom; ++dof) {
-                auto section_position_extrema = profiles[i][dof].get_position_extrema();
-                if (section_position_extrema.max > position_extrema[dof].max) {
-                    position_extrema[dof].max = section_position_extrema.max;
-                    position_extrema[dof].t_max = section_position_extrema.t_max;
-                }
-                if (section_position_extrema.min < position_extrema[dof].min) {
-                    position_extrema[dof].min = section_position_extrema.min;
-                    position_extrema[dof].t_min = section_position_extrema.t_min;
-                }
-            }
+        for (size_t dof = 0; dof < degrees_of_freedom; ++dof) {
+            position_extrema[dof] = get_position_extrema_for_dof(dof);
         }
     }
 

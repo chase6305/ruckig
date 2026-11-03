@@ -238,6 +238,7 @@ public:
             inp_per_dof_synchronization[dof] = inp.per_dof_synchronization ? inp.per_dof_synchronization.value()[dof] : inp.synchronization;
 
             if (!inp.enabled[dof]) {
+                p = Profile{};
                 p.p.back() = inp.current_position[dof];
                 p.v.back() = inp.current_velocity[dof];
                 p.a.back() = inp.current_acceleration[dof];
@@ -245,6 +246,7 @@ public:
                 blocks[dof].t_min = 0.0;
                 blocks[dof].a = std::nullopt;
                 blocks[dof].b = std::nullopt;
+                blocks[dof].p_min = p;
                 continue;
             }
 
