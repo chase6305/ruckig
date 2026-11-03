@@ -38,6 +38,7 @@ class Trajectory {
 
     double duration {0.0};
     bool calculated {false};
+    bool profiles_calculated {false};
     Container<double> cumulative_times;
 
     Vector<double> independent_min_durations;
@@ -50,6 +51,13 @@ class Trajectory {
 
     std::span<const double> times_view() const {
         return local_profiles.empty() ? std::span<const double>(cumulative_times) : std::span<const double>(local_cumulative_times);
+    }
+
+    bool has_valid_profile_structure() const {
+        const auto active_profiles = profiles_view();
+        return degrees_of_freedom > 0 && (DOFs == 0 || degrees_of_freedom == DOFs)
+            && !active_profiles.empty() && active_profiles.front().size() == degrees_of_freedom
+            && times_view().size() == active_profiles.size();
     }
 
 #if defined WITH_CLOUD_CLIENT
@@ -72,6 +80,9 @@ class Trajectory {
     //! Calculates the base values to then integrate from
     template<typename Func>
     void state_to_integrate_from(double time, size_t& new_section, Func&& set_integrate) const {
+        if (!calculated || !has_valid_profile_structure() || !std::isfinite(time)) {
+            throw RuckigError("trajectory sampling requires a calculated trajectory, matching dimensions, and a finite time.");
+        }
         const auto profiles = profiles_view();
         const auto cumulative_times = times_view();
         if (time >= duration) {
@@ -314,6 +325,9 @@ public:
 
     //! Get the underlying profiles of the trajectory (only in the Ruckig Community Version)
     std::vector<Vector<Profile>> get_profiles() const {
+        if ((!calculated && !profiles_calculated) || !has_valid_profile_structure()) {
+            throw RuckigError("trajectory profiles require a calculated trajectory.");
+        }
         const auto view = profiles_view();
         return {view.begin(), view.end()};
     }
@@ -325,17 +339,26 @@ public:
 
     //! Get the durations when the intermediate waypoints are reached
     std::vector<double> get_intermediate_durations() const {
+        if ((!calculated && !profiles_calculated) || !has_valid_profile_structure()) {
+            throw RuckigError("intermediate durations require a calculated trajectory.");
+        }
         const auto view = times_view();
         return {view.begin(), view.end()};
     }
 
     //! Get the minimum duration of each independent DoF
     Vector<double> get_independent_min_durations() const {
+        if ((!calculated && !profiles_calculated) || !has_valid_profile_structure()) {
+            throw RuckigError("independent durations require a calculated trajectory.");
+        }
         return independent_min_durations;
     }
 
     //! Get the min/max values of the position for each DoF
     void get_position_extrema(CustomVector<Bound, DOFs>& position_extrema) const {
+        if ((!calculated && !profiles_calculated) || !has_valid_profile_structure()) {
+            throw RuckigError("position extrema require a calculated trajectory.");
+        }
         if (position_extrema.size() != degrees_of_freedom) {
             throw RuckigError("mismatch in degrees of freedom (vector size).");
         }
@@ -346,11 +369,11 @@ public:
 
     //! Get the time that this trajectory passes a specific position of a given DoF the first time
     std::optional<double> get_first_time_at_position(size_t dof, double position, double time_after=0.0) const {
-        const auto profiles = profiles_view();
-        const auto cumulative_times = times_view();
-        if (dof >= degrees_of_freedom || !std::isfinite(time_after)) {
+        if (!calculated || !has_valid_profile_structure() || dof >= degrees_of_freedom || !std::isfinite(position) || !std::isfinite(time_after)) {
             return std::nullopt;
         }
+        const auto profiles = profiles_view();
+        const auto cumulative_times = times_view();
 
         const auto find_in_step = [&](double start, double duration, double p, double v, double a, double j) -> std::optional<double> {
             const double earliest = std::max(0.0, time_after - start);

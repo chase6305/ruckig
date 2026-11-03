@@ -52,5 +52,23 @@ int main() {
     if (ruckig_optimize_waypoints(*otg, input, trajectory, 8) != ruckig::Result::Working || trajectory.get_duration() >= stopping_duration) {
         return 11;
     }
+    std::vector<double> p(2), v(2), a(2);
+    for (double time: {std::numeric_limits<double>::quiet_NaN(), std::numeric_limits<double>::infinity(), -std::numeric_limits<double>::infinity()}) {
+        try {
+            traj_at_time(trajectory, time, p.data(), v.data(), a.data(), 2);
+            return 12;
+        } catch (const ruckig::RuckigError&) {
+        }
+    }
+    traj_at_time(trajectory, 0.0, p.data(), v.data(), a.data(), 2);
+    if (p != input.current_position) {
+        return 13;
+    }
+    output_invalidate_trajectory(output);
+    try {
+        traj_at_time(output_get_trajectory(output), 0.0, p.data(), v.data(), a.data(), 2);
+        return 14;
+    } catch (const ruckig::RuckigError&) {
+    }
     return ruckig_calculate_waypoints(*otg, empty, trajectory, nullptr, 0, nullptr, 0) == ruckig::Result::ErrorInvalidInput ? 0 : 8;
 }

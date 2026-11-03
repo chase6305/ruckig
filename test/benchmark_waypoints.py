@@ -1,5 +1,6 @@
 """Run with the built ruckig Python module; times include Python call overhead."""
 
+import math
 import statistics
 import time
 
@@ -18,6 +19,10 @@ def main():
         ('reverse-1d', [[1.0]], [0.0]),
         ('uneven-1d', [[0.25], [1.0]], [3.0]),
         ('repeat-1d', [[1.0], [1.0], [2.0]], [3.0]),
+        ('arc-2d-19', [[math.sin(math.pi * k / 40), 1 - math.cos(math.pi * k / 40)] for k in range(1, 20)], [1.0, 1.0]),
+        ('arc-2d-39', [[math.sin(math.pi * k / 80), 1 - math.cos(math.pi * k / 80)] for k in range(1, 40)], [1.0, 1.0]),
+        ('sine-2d-19', [[3.0 * k / 20, 0.1 * math.sin(2 * math.pi * k / 20)] for k in range(1, 20)], [3.0, 0.0]),
+        ('sine-2d-39', [[3.0 * k / 40, 0.1 * math.sin(2 * math.pi * k / 40)] for k in range(1, 40)], [3.0, 0.0]),
     ]
     print(f'{"Case":<18} {"Stops (s)":>10} {"Auto (s)":>10} {"Median (us)":>12}')
     for name, points, target in cases:

@@ -180,7 +180,10 @@ void PositionThirdOrderStep1::time_all_none_acc0_acc1(ProfileIter& profile, doub
     const double h2_scale = (a0_a0 + af_af)/(2*std::abs(jMax)) + std::abs(v0) + std::abs(vf);
     const auto first_none_profile = profile;
     for (double t: roots_none) {
-        const double time_tolerance = 64 * DBL_EPSILON * std::max({1.0, std::abs(t), h2_scale/(2*std::abs(jMax)*std::max(t, DBL_EPSILON))});
+        const double time_scale = std::max({1.0, std::abs(t), std::abs(a0/jMax), std::abs(af/jMax)});
+        // An ill-conditioned root must not permit macroscopic time corrections.
+        const double time_tolerance = std::min(1e-12 * time_scale,
+            64 * DBL_EPSILON * std::max(time_scale, h2_scale/(2*std::abs(jMax)*std::max(t, DBL_EPSILON))));
         if (!std::isfinite(t) || !std::isfinite(time_tolerance) || t < t_min_none - time_tolerance || t > t_max_none + time_tolerance) {
             continue;
         }
@@ -581,6 +584,39 @@ bool PositionThirdOrderStep1::get_profile(const Profile& input, Block& block) {
     }
 
 return_block:
+    // A newly recovered long root must not suppress the single-jerk fallback.
+    // Recover a missing short solution only when the intervening gap is provable.
+    const bool one_duration = profile == start + 1 || (profile == start + 2
+        && std::abs(start[0].t_sum.back() - start[1].t_sum.back()) < 8 * DBL_EPSILON);
+    if (one_duration && af != a0) {
+        Profile single;
+        single.set_boundary(input);
+        single.t.fill(0.0);
+        const double jf = std::copysign(_jMax, af - a0);
+        single.t[0] = (af - a0)/jf;
+        const bool up = jf > 0.0;
+        const double time_margin = 1e-12 * std::max(1.0, start->t_sum.back());
+        // Fixed endpoint accelerations bound the reachable velocity integral.
+        // For tf > single.t[0], tf below this bound cannot reach the target velocity.
+        const double isolation_bound = 2 * std::abs(a0/_jMax + af/_jMax) - single.t[0];
+        const double velocity_roundoff = 64 * DBL_EPSILON * std::max({1.0, std::abs(v0), std::abs(vf),
+            std::abs(a0 * single.t[0]), std::abs(jf * single.t[0] * single.t[0])});
+        const double gap = start->t_sum.back() - single.t[0];
+        if (single.t[0] < start->t_sum.back() - time_margin
+            && std::isfinite(isolation_bound) && start->t_sum.back() <= isolation_bound + time_margin
+            && single.check<ControlSigns::UDDU, ReachedLimits::NONE>(jf,
+                up ? _vMax : _vMin, up ? _vMin : _vMax, up ? _aMax : _aMin, up ? _aMin : _aMax)
+            // Require a roundoff-level velocity match and a gap resolvable under
+            // the existing 1e-8 endpoint velocity tolerance.
+            && std::abs(single.v.back() - vf) <= velocity_roundoff
+            && _jMax * gap * gap / 16 > 1e-8 + velocity_roundoff) {
+            block.set_min_profile(single);
+            if (std::abs(vf) >= DBL_EPSILON || std::abs(af) >= DBL_EPSILON) {
+                block.a = Block::Interval(single, *start);
+            }
+            return true;
+        }
+    }
     return Block::calculate_block(block, valid_profiles, std::distance(start, profile));
 }
 

@@ -44,6 +44,10 @@ jobs:
       env:
         CTEST_OUTPUT_ON_FAILURE: 1
 
+    - name: Test C++ regressions on macOS and Windows
+      if: matrix.os != 'ubuntu-latest'
+      run: ctest --test-dir ./build --build-config Release --output-on-failure
+
     - name: Memory Test
       if: matrix.os == 'ubuntu-latest'
       run: |

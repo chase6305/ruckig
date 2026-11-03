@@ -1,3 +1,4 @@
+import math
 import unittest
 
 from ruckig import InputParameter, OutputParameter, Result, Ruckig, RuckigError, Trajectory
@@ -176,6 +177,75 @@ class WrapperRegressionTest(unittest.TestCase):
             self.assertAlmostEqual(p[0], point[0])
             self.assertAlmostEqual(p[1], point[1])
             self.assertGreater(v[0], 0.1)
+
+    def test_repeated_waypoints_keep_motion(self):
+        self.input.target_position = [3.0]
+        self.input.max_velocity = self.input.max_acceleration = [2.0]
+        self.input.max_jerk = [4.0]
+        self.input.intermediate_positions = [[1.0], [1.0], [2.0]]
+        trajectory = Trajectory(1)
+        self.assertEqual(Ruckig(1).optimize_waypoints(self.input, trajectory), Result.Working)
+        self.assertAlmostEqual(trajectory.duration, 3.0)
+        times = trajectory.intermediate_durations
+        self.assertEqual(times[0], times[1])
+        p, v, a = trajectory.at_time(times[0])
+        self.assertAlmostEqual(p[0], 1.0)
+        self.assertGreater(v[0], 1.0)
+        self.assertGreater(a[0], 0.1)
+
+    def test_sampling_rejects_invalid_state_and_time(self):
+        trajectory = Trajectory(1)
+        self.assertEqual(trajectory.duration, 0.0)
+        with self.assertRaises(RuckigError):
+            trajectory.at_time(0.0)
+
+        otg = Ruckig(1)
+        self.assertEqual(otg.calculate(self.input, trajectory), Result.Working)
+        for time in (float('nan'), float('inf'), float('-inf')):
+            with self.assertRaises(RuckigError):
+                trajectory.at_time(time)
+            with self.assertRaises(RuckigError):
+                trajectory.at_times([0.0, time])
+        p, v, a = trajectory.at_time(-0.1)
+        self.assertTrue(all(abs(state[0]) < 1.0 for state in (p, v, a)))
+        self.assertIsNone(trajectory.get_first_time_at_position(0, float('nan')))
+        self.input.max_position = [0.5]
+        self.assertEqual(otg.calculate(self.input, trajectory), Result.ErrorPositionalLimits)
+        with self.assertRaises(RuckigError):
+            trajectory.at_time(0.0)
+
+    def test_dense_curved_waypoints(self):
+        inp = InputParameter(2)
+        inp.target_position = [1.0, 1.0]
+        inp.max_velocity = inp.max_acceleration = [2.0, 2.0]
+        inp.max_jerk = [4.0, 4.0]
+        inp.intermediate_positions = [[math.sin(math.pi * i / 80), 1 - math.cos(math.pi * i / 80)] for i in range(1, 40)]
+        trajectory = Trajectory(2)
+        self.assertEqual(Ruckig(2).optimize_waypoints(inp, trajectory), Result.Working)
+        self.assertLess(trajectory.duration, 3.5)
+        for point, time in zip(inp.intermediate_positions, trajectory.intermediate_durations):
+            p, _, _ = trajectory.at_time(time)
+            self.assertAlmostEqual(p[0], point[0])
+            self.assertAlmostEqual(p[1], point[1])
+
+    def test_filter_waypoints_locally_and_validate_thresholds(self):
+        inp = InputParameter(2)
+        inp.current_position = [0.0, 0.0]
+        inp.target_position = [1.0, 0.0]
+        inp.intermediate_positions = [[0.5, 10.0]]
+        otg = Ruckig(2)
+        self.assertEqual(otg.filter_intermediate_positions(inp, [0.1, 0.1]), inp.intermediate_positions)
+        inp.intermediate_positions = [[0.5, 0.05]]
+        self.assertEqual(otg.filter_intermediate_positions(inp, [0.1, 0.1]), [])
+        inp.target_position = [0.0, 0.0]
+        inp.intermediate_positions = [[10.0, 0.0]]
+        self.assertEqual(otg.filter_intermediate_positions(inp, [0.1, 0.1]), inp.intermediate_positions)
+        for threshold in ([], [0.1], [-0.1, 0.1], [float('nan'), 0.1]):
+            with self.assertRaises(RuckigError):
+                otg.filter_intermediate_positions(inp, threshold)
+        inp.intermediate_positions = [[1.0]]
+        with self.assertRaises(RuckigError):
+            otg.filter_intermediate_positions(inp, [0.1, 0.1])
 
 
 if __name__ == '__main__':

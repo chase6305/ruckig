@@ -13,10 +13,11 @@ mod ffi {
         fn traj_new(dofs: usize, waypoints: usize) -> UniquePtr<Trajectory>;
         fn traj_get_dofs(traj: &Trajectory) -> usize;
         fn traj_get_duration(traj: &Trajectory) -> f64;
-        unsafe fn traj_at_time(traj: &Trajectory, time: f64, pos: *mut f64, vel: *mut f64, acc: *mut f64, len: usize);
+        unsafe fn traj_at_time(traj: &Trajectory, time: f64, pos: *mut f64, vel: *mut f64, acc: *mut f64, len: usize) -> Result<()>;
 
         // InputParameter
         fn input_new(dofs: usize) -> UniquePtr<InputParameter>;
+        fn input_get_dofs(input: &InputParameter) -> usize;
         fn input_get_control_interface(input: &InputParameter) -> i32;
         fn input_set_control_interface(input: Pin<&mut InputParameter>, v: i32);
         fn input_get_synchronization(input: &InputParameter) -> i32;
@@ -45,12 +46,14 @@ mod ffi {
         fn input_get_min_position(input: &InputParameter) -> &CxxVector<f64>;
         unsafe fn input_set_intermediate_positions(input: Pin<&mut InputParameter>, data: *const f64, dofs: usize, count: usize);
         fn input_clear_intermediate_positions(input: Pin<&mut InputParameter>);
+        fn input_get_intermediate_positions_count(input: &InputParameter) -> usize;
         unsafe fn input_get_intermediate_positions(input: &InputParameter, buf: *mut f64, capacity: usize) -> usize;
 
         // OutputParameter
         fn output_new_direct(dofs: usize) -> UniquePtr<OutputParameter>;
         fn output_new(dofs: usize, waypoints: usize) -> UniquePtr<OutputParameter>;
         fn output_get_trajectory(output: &OutputParameter) -> &Trajectory;
+        fn output_invalidate_trajectory(output: Pin<&mut OutputParameter>);
         fn output_get_new_position(output: &OutputParameter) -> &CxxVector<f64>;
         fn output_get_new_velocity(output: &OutputParameter) -> &CxxVector<f64>;
         fn output_get_new_acceleration(output: &OutputParameter) -> &CxxVector<f64>;
@@ -67,6 +70,7 @@ mod ffi {
         fn ruckig_new(dofs: usize, delta_time: f64, waypoints: usize) -> UniquePtr<Ruckig>;
         fn ruckig_update(ruckig: Pin<&mut Ruckig>, input: &InputParameter, output: Pin<&mut OutputParameter>) -> i32;
         fn ruckig_update_trajectory(ruckig: Pin<&mut Ruckig>, trajectory: &Trajectory, output: Pin<&mut OutputParameter>) -> i32;
+        fn ruckig_update_current_trajectory(ruckig: Pin<&mut Ruckig>, output: Pin<&mut OutputParameter>) -> i32;
         fn ruckig_calculate(ruckig: Pin<&mut Ruckig>, input: &InputParameter, trajectory: Pin<&mut Trajectory>) -> i32;
         unsafe fn ruckig_calculate_waypoints(ruckig: Pin<&mut Ruckig>, input: &InputParameter, trajectory: Pin<&mut Trajectory>, velocities: *const f64, velocity_count: usize, accelerations: *const f64, acceleration_count: usize) -> i32;
         fn ruckig_optimize_waypoints(ruckig: Pin<&mut Ruckig>, input: &InputParameter, trajectory: Pin<&mut Trajectory>, max_iterations: usize) -> i32;
@@ -88,7 +92,8 @@ fn traj_at_time_impl(inner: &ffi::Trajectory, time: f64) -> (Vec<f64>, Vec<f64>,
     let mut vel = vec![0.0f64; dofs];
     let mut acc = vec![0.0f64; dofs];
     unsafe {
-        ffi::traj_at_time(inner, time, pos.as_mut_ptr(), vel.as_mut_ptr(), acc.as_mut_ptr(), dofs);
+        ffi::traj_at_time(inner, time, pos.as_mut_ptr(), vel.as_mut_ptr(), acc.as_mut_ptr(), dofs)
+            .expect("trajectory sampling requires a calculated trajectory and a finite time");
     }
     (pos, vel, acc)
 }
@@ -106,6 +111,7 @@ impl Trajectory {
         ffi::traj_get_duration(&self.0)
     }
 
+    /// Panics if the trajectory has not been calculated successfully or time is not finite.
     pub fn at_time(&self, time: f64) -> (Vec<f64>, Vec<f64>, Vec<f64>) {
         traj_at_time_impl(&self.0, time)
     }
@@ -116,6 +122,7 @@ impl<'a> TrajectoryRef<'a> {
         ffi::traj_get_duration(self.inner)
     }
 
+    /// Panics if the trajectory has not been calculated successfully or time is not finite.
     pub fn at_time(&self, time: f64) -> (Vec<f64>, Vec<f64>, Vec<f64>) {
         traj_at_time_impl(self.inner, time)
     }
@@ -211,6 +218,7 @@ impl InputParameter {
     }
 
     fn sync(&mut self) {
+        self.degrees_of_freedom = ffi::input_get_dofs(&self.inner);
         self.control_interface = unsafe { std::mem::transmute(ffi::input_get_control_interface(&self.inner)) };
         self.synchronization   = unsafe { std::mem::transmute(ffi::input_get_synchronization(&self.inner)) };
 
@@ -226,7 +234,7 @@ impl InputParameter {
         self.max_position         = ffi::input_get_max_position(&self.inner).iter().cloned().collect();
         self.min_position         = ffi::input_get_min_position(&self.inner).iter().cloned().collect();
 
-        let cap = self.degrees_of_freedom * 256;
+        let cap = self.degrees_of_freedom * ffi::input_get_intermediate_positions_count(&self.inner);
         let mut flat = vec![0.0f64; cap];
         let written = unsafe { ffi::input_get_intermediate_positions(&self.inner, flat.as_mut_ptr(), cap) };
         self.intermediate_positions = if self.degrees_of_freedom > 0 && written > 0 {
@@ -236,7 +244,21 @@ impl InputParameter {
         };
     }
 
-    fn apply(&mut self) {
+    fn has_valid_dimensions(&self) -> bool {
+        let dofs = self.degrees_of_freedom;
+        dofs > 0
+            && [&self.current_position, &self.current_velocity, &self.current_acceleration,
+                &self.target_position, &self.target_velocity, &self.target_acceleration,
+                &self.max_velocity, &self.max_acceleration, &self.max_jerk,
+                &self.max_position, &self.min_position].iter().all(|row| row.len() == dofs)
+            && self.intermediate_positions.iter().all(|row| row.len() == dofs)
+    }
+
+    fn apply(&mut self) -> bool {
+        // Validate before flattening: ragged rows would make C++ read past flat's end.
+        if !self.has_valid_dimensions() {
+            return false;
+        }
         ffi::input_set_control_interface(self.inner.pin_mut(), self.control_interface as i32);
         ffi::input_set_synchronization(self.inner.pin_mut(),   self.synchronization as i32);
 
@@ -261,6 +283,7 @@ impl InputParameter {
             let flat: Vec<f64> = self.intermediate_positions.iter().flat_map(|r| r.iter().cloned()).collect();
             unsafe { ffi::input_set_intermediate_positions(self.inner.pin_mut(), flat.as_ptr(), dofs, self.intermediate_positions.len()); }
         }
+        true
     }
 }
 
@@ -311,9 +334,12 @@ impl OutputParameter {
     }
 
     fn sync(&mut self) {
-        self.new_position         = ffi::output_get_new_position(&self.inner).iter().cloned().collect();
-        self.new_velocity         = ffi::output_get_new_velocity(&self.inner).iter().cloned().collect();
-        self.new_acceleration     = ffi::output_get_new_acceleration(&self.inner).iter().cloned().collect();
+        self.new_position.clear();
+        self.new_position.extend(ffi::output_get_new_position(&self.inner).iter().copied());
+        self.new_velocity.clear();
+        self.new_velocity.extend(ffi::output_get_new_velocity(&self.inner).iter().copied());
+        self.new_acceleration.clear();
+        self.new_acceleration.extend(ffi::output_get_new_acceleration(&self.inner).iter().copied());
         self.time                 = ffi::output_get_time(&self.inner);
         self.new_section          = ffi::output_get_new_section(&self.inner);
         self.new_calculation      = ffi::output_get_new_calculation(&self.inner);
@@ -362,6 +388,145 @@ mod tests {
     }
 
     #[test]
+    fn sync_preserves_more_than_256_waypoints() {
+        let mut input = InputParameter::new(2);
+        let waypoints: Vec<Vec<f64>> = (1..=300)
+            .map(|i| vec![i as f64, -(i as f64)])
+            .collect();
+        input.intermediate_positions = waypoints.clone();
+        assert!(input.apply());
+
+        input.intermediate_positions.clear();
+        input.sync();
+        assert_eq!(input.intermediate_positions, waypoints);
+
+        input.degrees_of_freedom = 1;
+        input.sync();
+        assert_eq!(input.degrees_of_freedom, 2);
+        assert_eq!(input.intermediate_positions, waypoints);
+
+        input.intermediate_positions.clear();
+        assert!(input.apply());
+        input.sync();
+        assert!(input.intermediate_positions.is_empty());
+    }
+
+    #[test]
+    fn pass_to_input_preserves_more_than_256_remaining_waypoints() {
+        let mut otg = Ruckig::new_direct(2, 0.01);
+        let mut input = InputParameter::new(2);
+        let waypoints: Vec<Vec<f64>> = (1..=300)
+            .map(|i| vec![i as f64 / 301.0, -(i as f64) / 301.0])
+            .collect();
+        input.intermediate_positions = waypoints.clone();
+        input.target_position = vec![1.0, -1.0];
+        input.max_velocity = vec![1.0, 1.0];
+        input.max_acceleration = vec![1.0, 1.0];
+        input.max_jerk = vec![1.0, 1.0];
+        let mut trajectory = Trajectory::new_direct(2);
+        assert_eq!(otg.calculate_waypoints(&mut input, &mut trajectory), Result::Working);
+
+        let mut output = OutputParameter::new_direct(2);
+        assert_eq!(otg.update_trajectory(&trajectory, &mut output), Result::Working);
+        assert_eq!(output.new_section, 0);
+        output.pass_to_input(&mut input);
+        assert_eq!(input.intermediate_positions, waypoints);
+        assert_eq!(input.current_position, output.new_position);
+
+        for _ in 0..1000 {
+            assert_eq!(otg.update_trajectory(&trajectory, &mut output), Result::Working);
+            if output.new_section > 0 { break; }
+        }
+        assert_eq!(output.new_section, 1);
+        output.pass_to_input(&mut input);
+        assert_eq!(input.intermediate_positions, waypoints[1..]);
+        assert_eq!(input.current_position, output.new_position);
+        assert!(input.apply());
+        input.sync();
+        assert_eq!(input.intermediate_positions, waypoints[1..]);
+    }
+
+    #[test]
+    fn current_trajectory_replays_all_sections_and_keeps_terminal_state() {
+        let mut otg = Ruckig::new_direct(1, 0.05);
+        let mut input = input();
+        input.target_velocity = vec![0.2];
+        input.target_acceleration = vec![0.1];
+        let mut trajectory = Trajectory::new_direct(1);
+        assert_eq!(otg.calculate_waypoints_with_states(&mut input, &mut trajectory,
+            &[vec![0.25], vec![0.25]], &[vec![0.0], vec![0.0]]), Result::Working);
+        let mut output = OutputParameter::new_direct(1);
+        for state in [&mut output.new_position, &mut output.new_velocity, &mut output.new_acceleration] {
+            state.reserve(16);
+            state.extend([99.0, 99.0]);
+        }
+        let buffers = (output.new_position.as_ptr(), output.new_velocity.as_ptr(), output.new_acceleration.as_ptr());
+        let capacities = (output.new_position.capacity(), output.new_velocity.capacity(), output.new_acceleration.capacity());
+        let mut result = otg.update_trajectory(&trajectory, &mut output);
+        let mut visited_sections = [false; 4];
+        for _ in 0..1000 {
+            assert!(result == Result::Working || result == Result::Finished);
+            visited_sections[output.new_section] = true;
+            let (p, v, a) = trajectory.at_time(output.time);
+            assert_eq!(output.new_position, p);
+            assert_eq!(output.new_velocity, v);
+            assert_eq!(output.new_acceleration, a);
+            assert_eq!((output.new_position.as_ptr(), output.new_velocity.as_ptr(), output.new_acceleration.as_ptr()), buffers);
+            assert_eq!((output.new_position.capacity(), output.new_velocity.capacity(), output.new_acceleration.capacity()), capacities);
+            assert!(!output.new_calculation);
+            if result == Result::Finished { break; }
+            result = otg.update_current_trajectory(&mut output);
+        }
+        assert_eq!(result, Result::Finished);
+        assert_eq!(visited_sections, [true; 4]);
+        assert_eq!(output.time, trajectory.get_duration());
+        assert!((output.new_position[0] - input.target_position[0]).abs() < 1e-8);
+        assert!((output.new_velocity[0] - 0.2).abs() < 1e-8);
+        assert!((output.new_acceleration[0] - 0.1).abs() < 1e-8);
+        let terminal = (output.new_position.clone(), output.new_velocity.clone(), output.new_acceleration.clone());
+        for _ in 0..3 {
+            assert_eq!(otg.update_current_trajectory(&mut output), Result::Finished);
+            assert_eq!(output.time, trajectory.get_duration());
+            assert_eq!((&output.new_position, &output.new_velocity, &output.new_acceleration), (&terminal.0, &terminal.1, &terminal.2));
+            assert!(!output.new_calculation);
+        }
+    }
+
+    #[test]
+    fn current_trajectory_rejects_fresh_failed_and_mismatched_outputs() {
+        use std::panic::{catch_unwind, AssertUnwindSafe};
+
+        let mut otg = Ruckig::new_direct(1, 0.1);
+        let mut output = OutputParameter::new_direct(1);
+        assert_eq!(otg.update_current_trajectory(&mut output), Result::ErrorInvalidInput);
+        assert!(!output.new_calculation);
+        assert!(catch_unwind(AssertUnwindSafe(|| output.trajectory().at_time(0.0))).is_err());
+
+        let mut input = input();
+        let mut trajectory = Trajectory::new_direct(1);
+        assert_eq!(otg.calculate_waypoints(&mut input, &mut trajectory), Result::Working);
+        assert_eq!(otg.update_trajectory(&trajectory, &mut output), Result::Working);
+        assert_eq!(otg.update_current_trajectory(&mut output), Result::Working);
+        input.current_position.clear();
+        assert_eq!(otg.update(&mut input, &mut output), Result::ErrorInvalidInput);
+        assert_eq!(otg.update_current_trajectory(&mut output), Result::ErrorInvalidInput);
+        assert!(!output.new_calculation);
+        assert!(catch_unwind(AssertUnwindSafe(|| output.trajectory().at_time(0.0))).is_err());
+
+        assert_eq!(otg.update_trajectory(&trajectory, &mut output), Result::Working);
+        let mut wrong_executor = Ruckig::new_direct(2, 0.1);
+        assert_eq!(wrong_executor.update_current_trajectory(&mut output), Result::ErrorInvalidInput);
+        assert!(!output.new_calculation);
+        assert!(catch_unwind(AssertUnwindSafe(|| output.trajectory().at_time(0.0))).is_err());
+        assert_eq!(otg.update_current_trajectory(&mut output), Result::ErrorInvalidInput);
+        assert_eq!(otg.update_trajectory(&trajectory, &mut output), Result::Working);
+        assert_eq!(otg.update_current_trajectory(&mut output), Result::Working);
+
+        let mut wrong_output = OutputParameter::new_direct(2);
+        assert_eq!(otg.update_current_trajectory(&mut wrong_output), Result::ErrorInvalidInput);
+    }
+
+    #[test]
     fn local_prescribed_and_malformed_states() {
         let mut otg = Ruckig::new_direct_and_offline(1);
         let mut input = input();
@@ -392,6 +557,68 @@ mod tests {
         input.intermediate_positions[0].clear();
         assert_eq!(otg.optimize_waypoints(&mut input, &mut trajectory, 8), Result::ErrorInvalidInput);
     }
+
+    #[test]
+    fn invalid_sampling_panics_without_aborting() {
+        use std::panic::{catch_unwind, AssertUnwindSafe};
+
+        let mut otg = Ruckig::new_direct_and_offline(1);
+        let mut input = input();
+        let mut trajectory = Trajectory::new_direct(1);
+        assert!(catch_unwind(AssertUnwindSafe(|| trajectory.at_time(0.0))).is_err());
+        assert_eq!(otg.calculate_waypoints(&mut input, &mut trajectory), Result::Working);
+        for time in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            assert!(catch_unwind(AssertUnwindSafe(|| trajectory.at_time(time))).is_err());
+        }
+        assert!(trajectory.at_time(-0.1).0[0].is_finite());
+        input.current_position.clear();
+        assert_eq!(otg.calculate_waypoints(&mut input, &mut trajectory), Result::ErrorInvalidInput);
+        assert!(catch_unwind(AssertUnwindSafe(|| trajectory.at_time(0.0))).is_err());
+    }
+
+    #[test]
+    fn ordinary_calls_reject_ragged_rows_and_invalidate_outputs() {
+        use std::panic::{catch_unwind, AssertUnwindSafe};
+
+        let mut otg = Ruckig::new_direct(2, 0.1);
+        let mut input = InputParameter::new(2);
+        input.target_position = vec![1.0, 1.0];
+        input.max_velocity = vec![1.0, 1.0];
+        input.max_acceleration = vec![1.0, 1.0];
+        input.max_jerk = vec![1.0, 1.0];
+        let mut trajectory = Trajectory::new_direct(2);
+        let mut output = OutputParameter::new_direct(2);
+        assert_eq!(otg.calculate(&mut input, &mut trajectory), Result::Working);
+        input.intermediate_positions = vec![vec![0.25, 0.25], vec![0.75]];
+        assert!(!input.apply());
+        assert_eq!(otg.calculate(&mut input, &mut trajectory), Result::ErrorInvalidInput);
+        assert_eq!(otg.update_trajectory(&trajectory, &mut output), Result::ErrorInvalidInput);
+
+        input.intermediate_positions.clear();
+        assert_eq!(otg.update(&mut input, &mut output), Result::Working);
+        assert!(output.new_calculation);
+
+        let mut wrong_input = InputParameter::new(1);
+        wrong_input.target_position = vec![1.0];
+        wrong_input.max_velocity = vec![1.0];
+        wrong_input.max_acceleration = vec![1.0];
+        wrong_input.max_jerk = vec![1.0];
+        assert_eq!(otg.update(&mut wrong_input, &mut output), Result::ErrorInvalidInput);
+        assert!(catch_unwind(AssertUnwindSafe(|| output.trajectory().at_time(0.0))).is_err());
+        assert_eq!(otg.update(&mut input, &mut output), Result::Working);
+        assert_eq!(otg.calculate(&mut input, &mut trajectory), Result::Working);
+        let mut wrong_executor = Ruckig::new_direct(1, 0.1);
+        assert_eq!(wrong_executor.update_trajectory(&trajectory, &mut output), Result::ErrorInvalidInput);
+        assert!(catch_unwind(AssertUnwindSafe(|| output.trajectory().at_time(0.0))).is_err());
+        assert_eq!(otg.update(&mut input, &mut output), Result::Working);
+        input.intermediate_positions = vec![vec![0.25, 0.25], vec![0.75]];
+        assert_eq!(otg.update(&mut input, &mut output), Result::ErrorInvalidInput);
+        assert!(!output.new_calculation);
+        assert!(catch_unwind(AssertUnwindSafe(|| output.trajectory().at_time(0.0))).is_err());
+        input.intermediate_positions.clear();
+        assert_eq!(otg.update(&mut input, &mut output), Result::Working);
+        assert!(output.new_calculation);
+    }
 }
 
 impl Ruckig {
@@ -415,23 +642,58 @@ impl Ruckig {
         ffi::ruckig_reset(self.0.pin_mut());
     }
 
+    fn invalidate_output(&mut self, output: &mut OutputParameter) {
+        self.reset();
+        ffi::output_invalidate_trajectory(output.inner.pin_mut());
+        output.new_calculation = false;
+    }
+
     pub fn update(&mut self, input: &mut InputParameter, output: &mut OutputParameter) -> Result {
-        input.apply();
+        output.new_calculation = false;
+        if !input.apply() {
+            self.invalidate_output(output);
+            return Result::ErrorInvalidInput;
+        }
         let raw = ffi::ruckig_update(self.0.pin_mut(), &input.inner, output.inner.pin_mut());
-        output.sync();
+        if raw >= 0 {
+            output.sync();
+        } else {
+            self.invalidate_output(output);
+        }
         Result::from(raw)
     }
 
     pub fn calculate(&mut self, input: &mut InputParameter, trajectory: &mut Trajectory) -> Result {
-        input.apply();
+        if !input.apply() {
+            self.reset();
+            let dofs = ffi::traj_get_dofs(&trajectory.0);
+            *trajectory = Trajectory::new_direct(dofs);
+            return Result::ErrorInvalidInput;
+        }
         let raw = ffi::ruckig_calculate(self.0.pin_mut(), &input.inner, trajectory.0.pin_mut());
         Result::from(raw)
     }
 
     pub fn update_trajectory(&mut self, trajectory: &Trajectory, output: &mut OutputParameter) -> Result {
+        output.new_calculation = false;
         let raw = ffi::ruckig_update_trajectory(self.0.pin_mut(), &trajectory.0, output.inner.pin_mut());
         if raw >= 0 {
             output.sync();
+        } else {
+            self.invalidate_output(output);
+        }
+        Result::from(raw)
+    }
+
+    /// Advance the trajectory already stored in output without copying its segments.
+    /// Load it first with `update_trajectory`; subsequent calls keep its terminal state.
+    pub fn update_current_trajectory(&mut self, output: &mut OutputParameter) -> Result {
+        output.new_calculation = false;
+        let raw = ffi::ruckig_update_current_trajectory(self.0.pin_mut(), output.inner.pin_mut());
+        if raw >= 0 {
+            output.sync();
+        } else {
+            self.invalidate_output(output);
         }
         Result::from(raw)
     }
@@ -446,10 +708,11 @@ impl Ruckig {
         velocities: &[Vec<f64>], accelerations: &[Vec<f64>]) -> Result {
         let dofs = input.degrees_of_freedom;
         let count = input.intermediate_positions.len();
-        if dofs == 0 || input.intermediate_positions.iter().any(|row| row.len() != dofs)
+        if !input.has_valid_dimensions()
             || (!velocities.is_empty() && velocities.len() != count)
             || (!accelerations.is_empty() && accelerations.len() != count)
             || velocities.iter().chain(accelerations.iter()).any(|row| row.len() != dofs) {
+            self.reset();
             let trajectory_dofs = ffi::traj_get_dofs(&trajectory.0);
             *trajectory = Trajectory::new_direct(trajectory_dofs);
             return Result::ErrorInvalidInput;
@@ -466,12 +729,12 @@ impl Ruckig {
 
     /// Automatically choose intermediate states using a bounded offline search (0..=64 iterations).
     pub fn optimize_waypoints(&mut self, input: &mut InputParameter, trajectory: &mut Trajectory, max_iterations: usize) -> Result {
-        if input.degrees_of_freedom == 0 || input.intermediate_positions.iter().any(|row| row.len() != input.degrees_of_freedom) {
+        if !input.apply() {
+            self.reset();
             let dofs = ffi::traj_get_dofs(&trajectory.0);
             *trajectory = Trajectory::new_direct(dofs);
             return Result::ErrorInvalidInput;
         }
-        input.apply();
         Result::from(ffi::ruckig_optimize_waypoints(self.0.pin_mut(), &input.inner, trajectory.0.pin_mut(), max_iterations))
     }
 }

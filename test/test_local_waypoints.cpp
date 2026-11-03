@@ -433,3 +433,141 @@ TEST_CASE("automatic-reference-must-visit-all-coordinates") {
     }
     check_sampled_limits(input, optimized);
 }
+
+TEST_CASE("repeated-moving-waypoints-share-a-time") {
+    Ruckig<1> otg(0.01);
+    auto input = make_input<1>();
+    input.intermediate_positions = {{1.0}, {1.0}, {2.0}};
+    Trajectory<1> trajectory;
+    REQUIRE(otg.optimize_waypoints(input, trajectory) == Result::Working);
+    CHECK(trajectory.get_duration() == doctest::Approx(3.0));
+    const auto times = trajectory.get_intermediate_durations();
+    REQUIRE(times.size() == 4);
+    CHECK(times[0] == times[1]);
+    double p = 0.0, v = 0.0, a = 0.0;
+    trajectory.at_time(times[0], p, v, a);
+    CHECK(p == doctest::Approx(1.0));
+    CHECK(v > 1.0);
+    CHECK(a > 0.1);
+    const auto profiles = trajectory.get_profiles();
+    CHECK(profiles[1][0].t_sum.back() == 0.0);
+    CHECK(profiles[1][0].v.front() == profiles[1][0].v.back());
+    check_sampled_limits(input, trajectory);
+
+    // Equal positions alone do not permit skipping a velocity/acceleration change.
+    input.intermediate_positions = {{1.0}, {1.0}};
+    REQUIRE(otg.calculate_waypoints(input, trajectory, {{0.5}, {0.4}}, {{0.0}, {0.0}}) == Result::Working);
+    const auto changed = trajectory.get_intermediate_durations();
+    CHECK(changed[1] > changed[0]);
+
+    input.current_velocity = input.target_velocity = {1.0};
+    input.max_velocity = {1.0};
+    input.max_jerk = {0.0};
+    input.intermediate_positions = {{0.5}, {0.5}, {1.5}};
+    input.target_position = {2.0};
+    REQUIRE(otg.optimize_waypoints(input, trajectory) == Result::Working);
+    CHECK(trajectory.get_duration() == doctest::Approx(2.0));
+    CHECK(trajectory.get_intermediate_durations()[0] == trajectory.get_intermediate_durations()[1]);
+    check_sampled_limits(input, trajectory);
+}
+
+TEST_CASE("automatic-curved-path-seeds") {
+    Ruckig<2> otg;
+    for (size_t count: {19, 39}) {
+        auto input = make_input<2>();
+        input.target_position = {1.0, 1.0};
+        for (size_t i = 1; i <= count; ++i) {
+            const double angle = std::acos(-1.0) * i / (2 * (count + 1));
+            input.intermediate_positions.push_back({std::sin(angle), 1.0 - std::cos(angle)});
+        }
+        Trajectory<2> stopping, coarse, optimized;
+        REQUIRE(otg.calculate_waypoints(input, stopping) == Result::Working);
+        REQUIRE(otg.optimize_waypoints(input, coarse, 1) == Result::Working);
+        REQUIRE(otg.optimize_waypoints(input, optimized) == Result::Working);
+        CHECK(optimized.get_duration() < 3.5);
+        CHECK(optimized.get_duration() <= coarse.get_duration());
+        CHECK(optimized.get_duration() < stopping.get_duration());
+        const auto times = optimized.get_intermediate_durations();
+        std::array<double, 2> p, v, a;
+        for (size_t i = 0; i < count; ++i) {
+            optimized.at_time(times[i], p, v, a);
+            for (size_t d = 0; d < 2; ++d) {
+                CHECK(p[d] == doctest::Approx(input.intermediate_positions[i][d]).epsilon(1e-8));
+            }
+        }
+        check_sampled_limits(input, optimized);
+    }
+}
+
+TEST_CASE("automatic-curved-path-with-static-axis-and-directional-limits") {
+    Ruckig<> otg(3);
+    auto input = make_input<0>(3);
+    input.target_position = {-1.0, 1.0, 0.0};
+    input.min_position = {-2.0, -2.0, 0.0};
+    input.min_velocity = std::vector<double>{-1.5, -0.75, 0.0};
+    input.min_acceleration = std::vector<double>{-1.0, -0.75, 0.0};
+    input.max_velocity[2] = input.max_acceleration[2] = input.max_jerk[2] = 0.0;
+    for (size_t i = 1; i < 20; ++i) {
+        const double angle = std::acos(-1.0) * i / 40;
+        input.intermediate_positions.push_back({-std::sin(angle), 1.0 - std::cos(angle), 0.0});
+    }
+    Trajectory<> stopping(3), optimized(3);
+    REQUIRE(otg.calculate_waypoints(input, stopping) == Result::Working);
+    REQUIRE(otg.optimize_waypoints(input, optimized) == Result::Working);
+    CHECK(optimized.get_duration() < stopping.get_duration());
+    check_sampled_limits(input, optimized);
+}
+
+TEST_CASE("repeating-curved-points-does-not-change-the-selected-motion") {
+    Ruckig<3> otg;
+    auto input = make_input<3>();
+    input.target_position = {1.0, 1.0, -0.5};
+    for (size_t i = 1; i < 20; ++i) {
+        const double angle = std::acos(-1.0) * i / 40;
+        input.intermediate_positions.push_back({std::sin(angle), 1.0 - std::cos(angle), -0.5 * std::sin(angle)});
+    }
+    Trajectory<3> compact, expanded;
+    REQUIRE(otg.optimize_waypoints(input, compact) == Result::Working);
+    const auto points = input.intermediate_positions;
+    for (size_t copies: {2, 5}) {
+        input.intermediate_positions.clear();
+        for (const auto& point: points) {
+            for (size_t i = 0; i < copies; ++i) {
+                input.intermediate_positions.push_back(point);
+            }
+        }
+        REQUIRE(otg.optimize_waypoints(input, expanded) == Result::Working);
+        CHECK(expanded.get_duration() == doctest::Approx(compact.get_duration()).epsilon(1e-8));
+        const auto times = expanded.get_intermediate_durations();
+        REQUIRE(times.size() == copies * points.size() + 1);
+        std::array<double, 3> p, v, a;
+        for (size_t i = 0; i < points.size(); ++i) {
+            for (size_t copy = 0; copy < copies; ++copy) {
+                CHECK(times[i * copies + copy] == times[i * copies]);
+            }
+            expanded.at_time(times[i * copies], p, v, a);
+            for (size_t d = 0; d < 3; ++d) {
+                CHECK(p[d] == doctest::Approx(points[i][d]).epsilon(1e-8));
+            }
+        }
+        check_sampled_limits(input, expanded);
+    }
+}
+
+TEST_CASE("curved-seeds-retain-the-existing-refinement-result") {
+    Ruckig<2> otg;
+    auto input = make_input<2>();
+    input.min_position = {-10.0, -10.0};
+    input.max_position = {10.0, 10.0};
+    input.target_position = {-1.9081063959308153, 2.8159313174375047};
+    input.intermediate_positions = {
+        {0.09030236784863338, 1.0180337400898734},
+        {0.0003459426247829356, 1.8623312038147626},
+        {-0.38127533656138, 2.4255174673022637},
+        {-1.0545614697098558, 2.707592530552376},
+    };
+    Trajectory<2> trajectory;
+    REQUIRE(otg.optimize_waypoints(input, trajectory) == Result::Working);
+    CHECK(trajectory.get_duration() < 4.007);
+    check_sampled_limits(input, trajectory);
+}

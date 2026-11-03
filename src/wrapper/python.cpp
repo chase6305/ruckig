@@ -159,8 +159,8 @@ limited by velocity, acceleration, and jerk constraints.";
         .def(nb::init<size_t, double>(), "dofs"_a, "delta_time"_a)
 #if defined WITH_CLOUD_CLIENT
         .def(nb::init<size_t, double, size_t>(), "dofs"_a, "delta_time"_a, "max_number_of_waypoints"_a=0)
-        .def("filter_intermediate_positions", &RuckigThrow<DynamicDOFs>::filter_intermediate_positions, "input"_a, "threshold_distance"_a)
 #endif
+        .def("filter_intermediate_positions", &RuckigThrow<DynamicDOFs>::filter_intermediate_positions, "input"_a, "threshold_distance"_a)
         .def_ro("max_number_of_waypoints", &RuckigThrow<DynamicDOFs>::max_number_of_waypoints)
         .def_ro("degrees_of_freedom", &RuckigThrow<DynamicDOFs>::degrees_of_freedom)
         .def_rw("delta_time", &RuckigThrow<DynamicDOFs>::delta_time)
