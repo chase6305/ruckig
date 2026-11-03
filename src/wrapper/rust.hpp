@@ -88,7 +88,7 @@ void output_pass_to_input(const OutputParameter& output, InputParameter& input) 
 // Ruckig
 std::unique_ptr<Ruckig> ruckig_new_direct_and_offline(size_t dofs) { return std::make_unique<Ruckig>(dofs); }
 std::unique_ptr<Ruckig> ruckig_new_direct(size_t dofs, double delta_time) { return std::make_unique<Ruckig>(dofs, delta_time); }
-std::unique_ptr<Ruckig> ruckig_new_offline(size_t dofs, size_t waypoints) { return std::make_unique<Ruckig>(dofs, waypoints); }
+std::unique_ptr<Ruckig> ruckig_new_offline(size_t dofs, size_t waypoints) { return std::make_unique<Ruckig>(dofs, -1.0, waypoints); }
 std::unique_ptr<Ruckig> ruckig_new(size_t dofs, double delta_time, size_t waypoints) { return std::make_unique<Ruckig>(dofs, delta_time, waypoints); }
 int ruckig_update(Ruckig& ruckig, const InputParameter& input, OutputParameter& output) { return static_cast<int>(ruckig.update(input, output)); }
 int ruckig_calculate(Ruckig& ruckig, const InputParameter& input, Trajectory& trajectory) { return static_cast<int>(ruckig.calculate(input, trajectory)); }

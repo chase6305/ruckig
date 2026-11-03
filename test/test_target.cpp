@@ -298,6 +298,77 @@ TEST_CASE("trajectory") {
     CHECK( independent_min_durations[2] == doctest::Approx(0.0) );
 }
 
+TEST_CASE("vector-dimensions") {
+    InputParameter<> input(2);
+    input.current_position = {0.0, 0.0};
+    input.target_position = {1.0, 1.0};
+    input.max_velocity = input.max_acceleration = input.max_jerk = {1.0, 1.0};
+
+    const auto valid = input;
+    for (auto member: {&InputParameter<>::current_position, &InputParameter<>::current_velocity,
+            &InputParameter<>::current_acceleration, &InputParameter<>::target_position,
+            &InputParameter<>::target_velocity, &InputParameter<>::target_acceleration,
+            &InputParameter<>::max_velocity, &InputParameter<>::max_acceleration,
+            &InputParameter<>::max_jerk, &InputParameter<>::min_position, &InputParameter<>::max_position}) {
+        for (size_t size: {0, 1, 3}) {
+            input = valid;
+            (input.*member).resize(size);
+            CHECK_FALSE(input.validate<false>());
+            CHECK_THROWS_AS(input.validate(), RuckigError);
+        }
+    }
+    input = valid;
+    input.min_velocity = std::vector<double>{-1.0};
+    CHECK_FALSE(input.validate<false>());
+    input = valid;
+    input.min_acceleration = std::vector<double>{-1.0};
+    CHECK_FALSE(input.validate<false>());
+    input = valid;
+    input.enabled.resize(1);
+    CHECK_FALSE(input.validate<false>());
+    input = valid;
+    input.per_dof_control_interface = std::vector<ControlInterface>{ControlInterface::Position};
+    CHECK_FALSE(input.validate<false>());
+    input = valid;
+    input.per_dof_synchronization = std::vector<Synchronization>{Synchronization::Time};
+    CHECK_FALSE(input.validate<false>());
+    input = valid;
+    input.intermediate_positions = {{0.5}};
+    CHECK_FALSE(input.validate<false>());
+    CHECK_FALSE(InputParameter<>(0).validate<false>());
+
+    Ruckig<> otg(2, 0.01);
+    Trajectory<> trajectory(1);
+    CHECK(otg.calculate(valid, trajectory) == Result::ErrorInvalidInput);
+    CHECK_FALSE(otg.validate_input<false>(InputParameter<>(1)));
+    OutputParameter<> output(1);
+    CHECK(otg.update(valid, output) == Result::ErrorInvalidInput);
+}
+
+TEST_CASE("batch-sampling") {
+    Ruckig<> otg(1);
+    InputParameter<> input(1);
+    input.current_position = {0.0};
+    input.target_position = {1.0};
+    input.max_velocity = input.max_acceleration = input.max_jerk = {1.0};
+    Trajectory<> trajectory(1);
+    REQUIRE(otg.calculate(input, trajectory) == Result::Working);
+    const std::vector<double> times{0.0, 0.5, trajectory.get_duration()};
+    std::vector<std::vector<double>> p(3, std::vector<double>(1)), v = p, a = p;
+    trajectory.at_times(times, p, v, a);
+    for (size_t i = 0; i < times.size(); ++i) {
+        std::vector<double> pi(1), vi(1), ai(1);
+        trajectory.at_time(times[i], pi, vi, ai);
+        CHECK(p[i] == pi);
+        CHECK(v[i] == vi);
+        CHECK(a[i] == ai);
+    }
+    p.pop_back();
+    CHECK_THROWS_AS(trajectory.at_times(times, p, v, a), RuckigError);
+    p.emplace_back();
+    CHECK_THROWS_AS(trajectory.at_times(times, p, v, a), RuckigError);
+}
+
 TEST_CASE("input-validation") {
     RuckigThrow<DynamicDOFs> ruckig {2};
     InputParameter input {2};

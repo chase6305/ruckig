@@ -158,6 +158,33 @@ public:
     //! Validate the input for trajectory calculation
     template<bool throw_validation_error = true>
     bool validate(bool check_current_state_within_limits = false, bool check_target_state_within_limits = true) const {
+        // Check sizes before indexing publicly writable vectors (also used by the wrappers).
+        if (degrees_of_freedom == 0 || (DOFs != 0 && degrees_of_freedom != DOFs)
+            || current_position.size() != degrees_of_freedom || current_velocity.size() != degrees_of_freedom
+            || current_acceleration.size() != degrees_of_freedom || target_position.size() != degrees_of_freedom
+            || target_velocity.size() != degrees_of_freedom || target_acceleration.size() != degrees_of_freedom
+            || max_velocity.size() != degrees_of_freedom || max_acceleration.size() != degrees_of_freedom
+            || max_jerk.size() != degrees_of_freedom || enabled.size() != degrees_of_freedom
+            || max_position.size() != degrees_of_freedom || min_position.size() != degrees_of_freedom
+            || (min_velocity && min_velocity->size() != degrees_of_freedom)
+            || (min_acceleration && min_acceleration->size() != degrees_of_freedom)
+            || (per_dof_control_interface && per_dof_control_interface->size() != degrees_of_freedom)
+            || (per_dof_synchronization && per_dof_synchronization->size() != degrees_of_freedom)) {
+            if constexpr (throw_validation_error) {
+                throw RuckigError("mismatch in degrees of freedom (vector size).");
+            }
+            return false;
+        }
+
+        for (const auto& waypoint: intermediate_positions) {
+            if (waypoint.size() != degrees_of_freedom) {
+                if constexpr (throw_validation_error) {
+                    throw RuckigError("mismatch in degrees of freedom (waypoint vector size).");
+                }
+                return false;
+            }
+        }
+
         for (size_t dof = 0; dof < degrees_of_freedom; ++dof) {
             const double jMax = max_jerk[dof];
             if (std::isnan(jMax) || jMax < 0.0) {
