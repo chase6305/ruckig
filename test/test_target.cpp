@@ -1193,6 +1193,29 @@ TEST_CASE("position-second-random-3") {
 }
 
 
+TEST_CASE("coincident-extremal-roots") {
+    Ruckig<1> otg;
+    for (double sign: {-1.0, 1.0}) {
+        InputParameter<1> input;
+        input.current_position = {sign};
+        input.target_position = {sign * 2.0};
+        input.current_velocity = input.target_velocity = {sign * 1.8693742147505434};
+        input.current_acceleration = {sign * 1.0222554876329362};
+        input.target_acceleration = {sign * -1.0222554876329362};
+        input.max_velocity = input.max_acceleration = {2.0};
+        input.max_jerk = {4.0};
+        Trajectory<1> trajectory;
+        REQUIRE(otg.calculate(input, trajectory) == Result::Working);
+        CHECK(trajectory.get_duration() == doctest::Approx(0.5111277438164681).epsilon(1e-10));
+        double p = 0.0, v = 0.0, a = 0.0;
+        trajectory.at_time(trajectory.get_duration(), p, v, a);
+        CHECK(p == doctest::Approx(input.target_position[0]).epsilon(1e-9));
+        CHECK(v == doctest::Approx(input.target_velocity[0]).epsilon(1e-9));
+        CHECK(a == doctest::Approx(input.target_acceleration[0]).epsilon(1e-9));
+    }
+}
+
+
 int main(int argc, char** argv) {
     doctest::Context context;
 

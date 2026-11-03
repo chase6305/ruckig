@@ -175,10 +175,16 @@ void PositionThirdOrderStep1::time_all_none_acc0_acc1(ProfileIter& profile, doub
     auto roots_acc0 = roots::solve_quart_monic(polynom_acc0);
     auto roots_acc1 = roots::solve_quart_monic(polynom_acc1);
 
+    // h2_none subtracts nearby velocities; dividing it by a short switch
+    // duration amplifies roundoff in the two outer switch times.
+    const double h2_scale = (a0_a0 + af_af)/(2*std::abs(jMax)) + std::abs(v0) + std::abs(vf);
+    const auto first_none_profile = profile;
     for (double t: roots_none) {
-        if (t < t_min_none || t > t_max_none) {
+        const double time_tolerance = 64 * DBL_EPSILON * std::max({1.0, std::abs(t), h2_scale/(2*std::abs(jMax)*std::max(t, DBL_EPSILON))});
+        if (!std::isfinite(t) || !std::isfinite(time_tolerance) || t < t_min_none - time_tolerance || t > t_max_none + time_tolerance) {
             continue;
         }
+        t = std::clamp(t, std::max(0.0, t_min_none), t_max_none);
 
         // Single Newton-step (regarding pd)
         if (t > DBL_EPSILON) {
@@ -198,7 +204,22 @@ void PositionThirdOrderStep1::time_all_none_acc0_acc1(ProfileIter& profile, doub
         profile->t[5] = 0;
         profile->t[6] = -h0 + t/2 + af/jMax;
 
-        if (profile->check<ControlSigns::UDDU, ReachedLimits::NONE>(jMax, vMax, vMin, aMax, aMin)) {
+        // A single saturated-jerk segment has zero-length outer switches. Roundoff
+        // must not discard it before the full boundary/kinematic checks below.
+        if (profile->t[0] >= -time_tolerance) {
+            profile->t[0] = std::max(0.0, profile->t[0]);
+        }
+        if (profile->t[6] >= -time_tolerance) {
+            profile->t[6] = std::max(0.0, profile->t[6]);
+        }
+
+        // Clamping roots onto the same boundary must not duplicate an extremal profile.
+        if (profile->check<ControlSigns::UDDU, ReachedLimits::NONE>(jMax, vMax, vMin, aMax, aMin)
+            && std::none_of(first_none_profile, profile, [profile](const Profile& other) {
+                return std::equal(other.t.begin(), other.t.end(), profile->t.begin(), [profile](double left, double right) {
+                    return std::abs(left - right) <= 64 * DBL_EPSILON * std::max(1.0, profile->t_sum.back());
+                });
+            })) {
             add_profile(profile);
             if (return_after_found) {
                 return;
