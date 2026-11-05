@@ -147,13 +147,17 @@ public:
 
         size_t start = 0;
         size_t end = start + 2;
+        size_t min_current = 1, max_current = 1;
         for (; end < n_waypoints + 2; ++end) {
             const auto& pos_start = (start == 0) ? input.current_position : input.intermediate_positions[start - 1];
             const auto& pos_end = (end == n_waypoints + 1) ? input.target_position : input.intermediate_positions[end - 1];
 
-            // Check for all intermediate positions
+            // The 1D tests are monotone in position, so the interior extrema suffice.
+            // In multiple dimensions retain the full point-wise intersection checks.
             bool are_all_below {true};
-            for (size_t current = start + 1; current < end; ++current) {
+            const size_t current_count = degrees_of_freedom == 1 ? 1 + (min_current != max_current) : end - start - 1;
+            for (size_t k = 0; k < current_count; ++k) {
+                const size_t current = degrees_of_freedom == 1 ? (k == 0 ? min_current : max_current) : start + 1 + k;
                 const auto& pos_current = input.intermediate_positions[current - 1];
 
                 // Is there a point t on the line that holds the threshold?
@@ -196,6 +200,18 @@ public:
             }
 
             is_active[end - 2] = !are_all_below;
+            if (degrees_of_freedom == 1) {
+                if (!are_all_below) {
+                    min_current = max_current = end;
+                } else {
+                    if (pos_end[0] < input.intermediate_positions[min_current - 1][0]) {
+                        min_current = end;
+                    }
+                    if (pos_end[0] > input.intermediate_positions[max_current - 1][0]) {
+                        max_current = end;
+                    }
+                }
+            }
             if (!are_all_below) {
                 start = end - 1;
             }
@@ -445,14 +461,24 @@ public:
             }
             return baseline_status;
         }
-        // Consecutive coincident points share one state variable. Refine it once,
-        // then expand the complete section timeline with zero-duration joins.
-        if (std::adjacent_find(input.intermediate_positions.begin(), input.intermediate_positions.end()) != input.intermediate_positions.end()) {
+        // Boundary points can reuse the prescribed endpoint state. Consecutive
+        // interior coincident points share one optimized state variable.
+        if (input.intermediate_positions.front() == input.current_position
+            || input.intermediate_positions.back() == input.target_position
+            || std::adjacent_find(input.intermediate_positions.begin(), input.intermediate_positions.end()) != input.intermediate_positions.end()) {
+            size_t first = 0, last = count;
+            while (first < last && input.intermediate_positions[first] == input.current_position) {
+                ++first;
+            }
+            while (last > first && input.intermediate_positions[last - 1] == input.target_position) {
+                --last;
+            }
             auto compact_input = input;
             compact_input.intermediate_positions.clear();
             std::vector<size_t> compact_indices;
-            compact_indices.reserve(count);
-            for (const auto& point: input.intermediate_positions) {
+            compact_indices.reserve(last - first);
+            for (size_t i = first; i < last; ++i) {
+                const auto& point = input.intermediate_positions[i];
                 if (compact_input.intermediate_positions.empty() || !(point == compact_input.intermediate_positions.back())) {
                     compact_input.intermediate_positions.push_back(point);
                 }
@@ -463,10 +489,15 @@ public:
                 const auto times = compact.get_intermediate_durations();
                 std::vector<Vector<double>> v(count, input.current_velocity), a(count, input.current_acceleration);
                 auto p = input.current_position;
-                for (size_t i = 0; i < count; ++i) {
-                    compact.at_time(times[compact_indices[i]], p, v[i], a[i]);
+                for (size_t i = first; i < last; ++i) {
+                    compact.at_time(times[compact_indices[i - first]], p, v[i], a[i]);
+                }
+                for (size_t i = last; i < count; ++i) {
+                    v[i] = input.target_velocity;
+                    a[i] = input.target_acceleration;
                 }
                 auto expanded = make_trajectory();
+                // Revalidate inherited endpoint states before accepting the expanded chain.
                 if (evaluator.calculate_waypoints(input, expanded, v, a) == Result::Working
                     && (!found || expanded.duration <= best.duration)) {
                     trajectory = std::move(expanded);
@@ -524,32 +555,42 @@ public:
             if (synchronization == Synchronization::Time) {
                 lower_bound = reference.duration;
             }
-            double time = 0.0;
-            bool visits_all = true;
-            for (size_t i = 0; i < count; ++i) {
-                const auto crossing = reference.get_first_time_at_position(crossing_dof, input.intermediate_positions[i][crossing_dof], time);
-                if (!crossing || *crossing > reference.duration) {
-                    visits_all = false;
-                    break;
-                }
-                time = *crossing;
-                reference.at_time(time, p_sample, v_seed[i], a_seed[i]);
-                for (size_t d = 0; d < degrees_of_freedom; ++d) {
-                    if (std::abs(p_sample[d] - input.intermediate_positions[i][d]) > 1e-8) {
-                        visits_all = false;
-                        break;
+            const auto visits_reference = [&](size_t dof) {
+                double time = 0.0;
+                for (size_t i = 0; i < count; ++i) {
+                    const auto crossing = reference.get_first_time_at_position(dof, input.intermediate_positions[i][dof], time);
+                    if (!crossing || *crossing > reference.duration) {
+                        return false;
+                    }
+                    time = *crossing;
+                    reference.at_time(time, p_sample, v_seed[i], a_seed[i]);
+                    for (size_t d = 0; d < degrees_of_freedom; ++d) {
+                        if (std::abs(p_sample[d] - input.intermediate_positions[i][d]) > 1e-8) {
+                            return false;
+                        }
                     }
                 }
-                if (!visits_all) {
-                    break;
-                }
-            }
-            if (visits_all) {
+                return true;
+            };
+            if (visits_reference(crossing_dof)) {
                 // Re-solve every segment and enforce the original position bounds.
                 try_seed(v_seed, a_seed);
                 if (found && (best.duration == 0.0 || (lower_bound > 0.0 && best.duration <= lower_bound + 1e-9 * std::max(1.0, lower_bound)))) {
                     trajectory = std::move(best);
                     return Result::Working;
+                }
+            } else if (lower_bound > 0.0) {
+                // A different axis can disambiguate a coordinate crossed twice.
+                // Accept only a chain reaching the endpoint lower bound, leaving
+                // the original seed and refinement path unchanged otherwise.
+                for (size_t d = 0; d < degrees_of_freedom; ++d) {
+                    if (d != crossing_dof && visits_reference(d)
+                        && evaluator.calculate_waypoints(input, candidate, v_seed, a_seed) == Result::Working
+                        && (!found || candidate.duration <= best.duration)
+                        && candidate.duration <= lower_bound + 1e-9 * std::max(1.0, lower_bound)) {
+                        trajectory = std::move(candidate);
+                        return Result::Working;
+                    }
                 }
             }
         }
@@ -761,35 +802,54 @@ public:
                     state_input.current_velocity[d] = state_input.target_velocity[d] = velocities[i][d];
                     state_input.current_acceleration[d] = state_input.target_acceleration[d] = accelerations[i][d];
                 }
-                if (state_input.template validate<false>(true, true)
-                    && solve_section(i, left_trial) == Result::Working && solve_section(i + 1, right_trial) == Result::Working) {
-                    const double next = total - sections[i].duration - sections[i + 1].duration + left_trial.duration + right_trial.duration;
-                    if (std::isfinite(next) && next <= 7.6e3 && next < total - 1e-10 * std::max(1.0, total)) {
-                        sections[i] = left_trial;
-                        sections[i + 1] = right_trial;
-                        total = next;
-                        return;
+                if (state_input.template validate<false>(true, true) && solve_section(i, left_trial) == Result::Working) {
+                    // The right section's nonnegative duration cannot lower this bound.
+                    const double best_possible = total - sections[i].duration - sections[i + 1].duration + left_trial.duration;
+                    if (best_possible < total - 1e-10 * std::max(1.0, total) && solve_section(i + 1, right_trial) == Result::Working) {
+                        const double next = total - sections[i].duration - sections[i + 1].duration + left_trial.duration + right_trial.duration;
+                        if (std::isfinite(next) && next <= 7.6e3 && next < total - 1e-10 * std::max(1.0, total)) {
+                            sections[i] = left_trial;
+                            sections[i + 1] = right_trial;
+                            total = next;
+                            return;
+                        }
                     }
                 }
                 velocities[i] = old_v;
                 accelerations[i] = old_a;
             };
+            // Neighbors stay fixed during one waypoint visit, and accepted pair cost
+            // only decreases. Reuse the four joint trials in the coordinate search.
+            std::array<Vector<double>, 4> joint_v, joint_a;
+            const auto joint_seen = [&](const Vector<double>& v, const Vector<double>& a) {
+                for (size_t trial = 0; trial < 4; ++trial) {
+                    if (joint_v[trial] == v && joint_a[trial] == a) {
+                        return true;
+                    }
+                }
+                return false;
+            };
             auto v = zero, a = zero;
             for (size_t iteration = 0; iteration < max_iterations; ++iteration) {
                 const double step = std::ldexp(0.5, -static_cast<int>(iteration));
                 for (size_t i = 0; i < count; ++i) {
+                    size_t joint_count = 0;
                     for (double sign: {-1.0, 1.0}) {
                         v = velocities[i];
                         a = accelerations[i];
                         for (size_t d = 0; d < degrees_of_freedom; ++d) {
                             v[d] = std::clamp(v[d] + sign * step * direction[i][d] * velocity_scale[i][d], v_lower[i][d], v_upper[i][d]);
                         }
+                        joint_v[joint_count] = v;
+                        joint_a[joint_count++] = a;
                         try_state(i, v, a);
                         v = velocities[i];
                         a = accelerations[i];
                         for (size_t d = 0; d < degrees_of_freedom; ++d) {
                             a[d] = std::clamp(a[d] + sign * step * outgoing_direction[i][d] * acceleration_scale[i][d], a_lower[i][d], a_upper[i][d]);
                         }
+                        joint_v[joint_count] = v;
+                        joint_a[joint_count++] = a;
                         try_state(i, v, a);
                     }
                     for (size_t d = 0; d < degrees_of_freedom; ++d) {
@@ -797,11 +857,15 @@ public:
                             v = velocities[i];
                             a = accelerations[i];
                             v[d] = std::clamp(v[d] + sign * step * velocity_scale[i][d], v_lower[i][d], v_upper[i][d]);
-                            try_state(i, v, a);
+                            if (!joint_seen(v, a)) {
+                                try_state(i, v, a);
+                            }
                             v = velocities[i];
                             a = accelerations[i];
                             a[d] = std::clamp(a[d] + sign * step * acceleration_scale[i][d], a_lower[i][d], a_upper[i][d]);
-                            try_state(i, v, a);
+                            if (!joint_seen(v, a)) {
+                                try_state(i, v, a);
+                            }
                         }
                     }
                 }
