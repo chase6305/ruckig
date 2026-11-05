@@ -1500,3 +1500,74 @@ int main(int argc, char** argv) {
 
     return context.run();
 }
+
+TEST_CASE("two-jerk-short-profile-duplicates") {
+    const double cases[][9] = {
+        {0.1453753844397165, 0.19828704469061514, -1.5118282382342487,
+            0.1533778742000582, -0.09897445831432958, -0.9779203520526656,
+            0.041120978405462194, 0.17459794995085792, 0.21571892835632012},
+        {1.2664458475998162, 0.028828272126480148, -1.7681621071382487,
+            1.266439524707023, -0.029368984644381438, -1.7866465898232171,
+            0.018396810435898914, 0.013775689764656818, 0.032172500200555731},
+    };
+    Ruckig<1> otg;
+    Trajectory<1> trajectory;
+    for (const auto& values: cases) {
+        InputParameter<1> input;
+        input.current_position = {values[0]};
+        input.current_velocity = {values[1]};
+        input.current_acceleration = {values[2]};
+        input.target_position = {values[3]};
+        input.target_velocity = {values[4]};
+        input.target_acceleration = {values[5]};
+        input.max_velocity = input.max_acceleration = {2.0};
+        input.max_jerk = {4.0};
+        CAPTURE(input);
+        REQUIRE(input.validate<false>(true, true));
+        const auto [p1, v1, a1] = integrate(values[6], values[0], values[1], values[2], -4.0);
+        const auto [p2, v2, a2] = integrate(values[7], p1, v1, a1, 4.0);
+        CHECK(p2 == doctest::Approx(values[3]).epsilon(1e-12));
+        CHECK(v2 == doctest::Approx(values[4]).epsilon(1e-12));
+        CHECK(a2 == doctest::Approx(values[5]).epsilon(1e-12));
+        REQUIRE(otg.calculate(input, trajectory) == Result::Working);
+        CHECK(trajectory.get_duration() == doctest::Approx(values[8]).epsilon(1e-9));
+        double p = 0.0, v = 0.0, a = 0.0;
+        for (size_t k = 0; k <= 40; ++k) {
+            trajectory.at_time(trajectory.get_duration() * k / 40.0, p, v, a);
+            CHECK(std::isfinite(p));
+            CHECK(std::abs(v) <= 2.0 + 1e-8);
+            CHECK(std::abs(a) <= 2.0 + 1e-8);
+        }
+        CHECK(std::abs(p - values[3]) < 1e-8);
+        CHECK(std::abs(v - values[4]) < 1e-8);
+        CHECK(std::abs(a - values[5]) < 1e-10);
+    }
+}
+
+TEST_CASE("two-jerk-short-profile-duplicates-retain-blocked-gap") {
+    Ruckig<1> otg;
+    InputParameter<1> input;
+    input.current_position = {1.2664458475998162};
+    input.current_velocity = {0.028828272126480148};
+    input.current_acceleration = {-1.7681621071382487};
+    input.target_position = {1.266439524707023};
+    input.target_velocity = {-0.029368984644381438};
+    input.target_acceleration = {-1.7866465898232171};
+    input.max_velocity = input.max_acceleration = {2.0};
+    input.max_jerk = {4.0};
+    Trajectory<1> trajectory;
+    input.minimum_duration = 0.0323;
+    REQUIRE(otg.calculate(input, trajectory) == Result::Working);
+    CHECK(trajectory.get_duration() == doctest::Approx(0.0323).epsilon(1e-10));
+
+    // At 0.1 s even the largest reachable velocity is too low: this is a
+    // genuine blocked gap, not an interval removable with the duplicate root.
+    input.minimum_duration = 0.1;
+    REQUIRE(otg.calculate(input, trajectory) == Result::Working);
+    CHECK(trajectory.get_duration() == doctest::Approx(1.7528470225583301).epsilon(1e-9));
+    double p = 0.0, v = 0.0, a = 0.0;
+    trajectory.at_time(trajectory.get_duration(), p, v, a);
+    CHECK(std::abs(p - input.target_position[0]) < 1e-8);
+    CHECK(std::abs(v - input.target_velocity[0]) < 1e-8);
+    CHECK(std::abs(a - input.target_acceleration[0]) < 1e-10);
+}
