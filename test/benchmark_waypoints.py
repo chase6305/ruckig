@@ -20,6 +20,7 @@ def main():
         ('reverse-1d-many', [[1.0], [-1.0], [1.0], [-1.0]], [0.0]),
         ('uneven-1d', [[0.25], [1.0]], [3.0]),
         ('repeat-1d', [[1.0], [1.0], [2.0]], [3.0]),
+        ('endpoint-2d', [[0.0, 0.0], [1.0, 1.0], [2.0, 0.5], [3.0, 0.0]], [3.0, 0.0]),
         ('arc-2d-19', [[math.sin(math.pi * k / 40), 1 - math.cos(math.pi * k / 40)] for k in range(1, 20)], [1.0, 1.0]),
         ('arc-2d-39', [[math.sin(math.pi * k / 80), 1 - math.cos(math.pi * k / 80)] for k in range(1, 40)], [1.0, 1.0]),
         ('arc-6d-19', [[math.sin(math.pi * k / 40), 1 - math.cos(math.pi * k / 40)] * 3 for k in range(1, 20)], [1.0] * 6),
@@ -33,6 +34,8 @@ def main():
         inp = InputParameter(dofs)
         inp.current_position = [0.0] * dofs
         inp.target_position = target
+        if name == 'endpoint-2d':
+            inp.current_velocity = inp.target_velocity = [1.0, 0.0]
         inp.intermediate_positions = points
         inp.max_velocity = inp.max_acceleration = [2.0] * dofs
         inp.max_jerk = [4.0] * dofs
@@ -51,6 +54,24 @@ def main():
             if repetition > 0:  # Exclude the warm-up call.
                 measurements.append(elapsed_us)
         print(f'{name:<18} {stopping_duration:>10.6f} {trajectory.duration:>10.6f} {statistics.median(measurements):>12.1f}')
+
+    print(f'\n{"1D input points":>18} {"Filtering median (us)":>23}')
+    for count in [1000, 5000, 10000]:
+        inp = InputParameter(1)
+        inp.current_position = [0.0]
+        inp.target_position = [float(count + 1)]
+        inp.intermediate_positions = [[float(k)] for k in range(1, count + 1)]
+        otg = Ruckig(1)
+        measurements = []
+        for repetition in range(12):
+            start = time.perf_counter_ns()
+            filtered = otg.filter_intermediate_positions(inp, [0.0])
+            elapsed_us = (time.perf_counter_ns() - start) / 1000
+            if filtered:
+                raise RuntimeError(f'{count} points: monotone route was not fully filtered')
+            if repetition > 0:
+                measurements.append(elapsed_us)
+        print(f'{count:>18} {statistics.median(measurements):>23.1f}')
 
 
 if __name__ == '__main__':

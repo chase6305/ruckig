@@ -147,13 +147,17 @@ public:
 
         size_t start = 0;
         size_t end = start + 2;
+        size_t min_current = 1, max_current = 1;
         for (; end < n_waypoints + 2; ++end) {
             const auto& pos_start = (start == 0) ? input.current_position : input.intermediate_positions[start - 1];
             const auto& pos_end = (end == n_waypoints + 1) ? input.target_position : input.intermediate_positions[end - 1];
 
-            // Check for all intermediate positions
+            // The 1D tests are monotone in position, so the interior extrema suffice.
+            // In multiple dimensions retain the full point-wise intersection checks.
             bool are_all_below {true};
-            for (size_t current = start + 1; current < end; ++current) {
+            const size_t current_count = degrees_of_freedom == 1 ? 1 + (min_current != max_current) : end - start - 1;
+            for (size_t k = 0; k < current_count; ++k) {
+                const size_t current = degrees_of_freedom == 1 ? (k == 0 ? min_current : max_current) : start + 1 + k;
                 const auto& pos_current = input.intermediate_positions[current - 1];
 
                 // Is there a point t on the line that holds the threshold?
@@ -196,6 +200,18 @@ public:
             }
 
             is_active[end - 2] = !are_all_below;
+            if (degrees_of_freedom == 1) {
+                if (!are_all_below) {
+                    min_current = max_current = end;
+                } else {
+                    if (pos_end[0] < input.intermediate_positions[min_current - 1][0]) {
+                        min_current = end;
+                    }
+                    if (pos_end[0] > input.intermediate_positions[max_current - 1][0]) {
+                        max_current = end;
+                    }
+                }
+            }
             if (!are_all_below) {
                 start = end - 1;
             }
@@ -445,14 +461,24 @@ public:
             }
             return baseline_status;
         }
-        // Consecutive coincident points share one state variable. Refine it once,
-        // then expand the complete section timeline with zero-duration joins.
-        if (std::adjacent_find(input.intermediate_positions.begin(), input.intermediate_positions.end()) != input.intermediate_positions.end()) {
+        // Boundary points can reuse the prescribed endpoint state. Consecutive
+        // interior coincident points share one optimized state variable.
+        if (input.intermediate_positions.front() == input.current_position
+            || input.intermediate_positions.back() == input.target_position
+            || std::adjacent_find(input.intermediate_positions.begin(), input.intermediate_positions.end()) != input.intermediate_positions.end()) {
+            size_t first = 0, last = count;
+            while (first < last && input.intermediate_positions[first] == input.current_position) {
+                ++first;
+            }
+            while (last > first && input.intermediate_positions[last - 1] == input.target_position) {
+                --last;
+            }
             auto compact_input = input;
             compact_input.intermediate_positions.clear();
             std::vector<size_t> compact_indices;
-            compact_indices.reserve(count);
-            for (const auto& point: input.intermediate_positions) {
+            compact_indices.reserve(last - first);
+            for (size_t i = first; i < last; ++i) {
+                const auto& point = input.intermediate_positions[i];
                 if (compact_input.intermediate_positions.empty() || !(point == compact_input.intermediate_positions.back())) {
                     compact_input.intermediate_positions.push_back(point);
                 }
@@ -463,10 +489,15 @@ public:
                 const auto times = compact.get_intermediate_durations();
                 std::vector<Vector<double>> v(count, input.current_velocity), a(count, input.current_acceleration);
                 auto p = input.current_position;
-                for (size_t i = 0; i < count; ++i) {
-                    compact.at_time(times[compact_indices[i]], p, v[i], a[i]);
+                for (size_t i = first; i < last; ++i) {
+                    compact.at_time(times[compact_indices[i - first]], p, v[i], a[i]);
+                }
+                for (size_t i = last; i < count; ++i) {
+                    v[i] = input.target_velocity;
+                    a[i] = input.target_acceleration;
                 }
                 auto expanded = make_trajectory();
+                // Revalidate inherited endpoint states before accepting the expanded chain.
                 if (evaluator.calculate_waypoints(input, expanded, v, a) == Result::Working
                     && (!found || expanded.duration <= best.duration)) {
                     trajectory = std::move(expanded);
