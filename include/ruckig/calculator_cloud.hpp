@@ -83,6 +83,7 @@ public:
 
     template<bool throw_error>
     Result calculate(const InputParameter<DOFs, CustomVector>& input, Trajectory<DOFs, CustomVector>& traj, double, bool& was_interrupted) {
+        traj.independent_min_durations_available = false;
         std::cout << "[ruckig] calculate trajectory via cloud API." << std::endl;
 
         nlohmann::json params;
@@ -142,6 +143,9 @@ public:
         const auto result = client.post(params, throw_error);
 
         was_interrupted = false;
+        if (result.is_null() || result.is_discarded()) {
+            return Result::Error;
+        }
         traj.degrees_of_freedom = input.degrees_of_freedom;
         traj.resize(result["profiles"].size() - 1);
 

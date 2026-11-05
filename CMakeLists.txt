@@ -78,6 +78,25 @@ if(BUILD_TESTS)
     add_executable(test-rust-wrapper test/test_rust_wrapper.cpp)
     target_link_libraries(test-rust-wrapper PRIVATE test-dependencies)
     add_test(NAME test-rust-wrapper COMMAND test-rust-wrapper)
+
+    # Compile the core and real cloud decoder into a separate executable. Do not
+    # link ruckig: the HTTP adapter replaces no symbols in the product library.
+    get_target_property(ruckig_cloud_test_core_sources ruckig SOURCES)
+    list(FILTER ruckig_cloud_test_core_sources EXCLUDE REGEX "(^|/)cloud_client\\.cpp$")
+    add_executable(test-cloud-client test/test_cloud_client.cpp
+      ${ruckig_cloud_test_core_sources} src/ruckig/cloud_client.cpp)
+    target_sources(test-cloud-client PRIVATE test/test_cloud_metadata.cpp)
+    target_compile_features(test-cloud-client PRIVATE cxx_std_20)
+    target_compile_definitions(test-cloud-client PRIVATE WITH_CLOUD_CLIENT)
+    target_include_directories(test-cloud-client PRIVATE
+      test/cloud_client_stub include third_party)
+    if(MSVC)
+      target_compile_definitions(test-cloud-client PRIVATE _USE_MATH_DEFINES)
+      target_compile_options(test-cloud-client PRIVATE /W4)
+    else()
+      target_compile_options(test-cloud-client PRIVATE -Wall -Wextra)
+    endif()
+    add_test(NAME test-cloud-client COMMAND test-cloud-client)
   endif()
   if(NOT MSVC)
     include(CTest)
