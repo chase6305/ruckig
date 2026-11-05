@@ -13,6 +13,25 @@ class WrapperRegressionTest(unittest.TestCase):
         self.input.max_acceleration = [1.0]
         self.input.max_jerk = [1.0]
 
+    def test_fresh_output_is_initialized(self):
+        for dofs in (1, 3):
+            output = OutputParameter(dofs)
+            self.assertEqual(output.calculation_duration, 0.0)
+            self.assertEqual(output.new_position, [0.0] * dofs)
+            self.assertEqual(output.new_velocity, [0.0] * dofs)
+            self.assertEqual(output.new_acceleration, [0.0] * dofs)
+            self.assertEqual(output.new_jerk, [0.0] * dofs)
+            self.assertIsInstance(repr(output), str)
+
+    def test_disabled_axis_clears_previous_minimum_duration(self):
+        otg, trajectory = Ruckig(1), Trajectory(1)
+        self.assertEqual(otg.calculate(self.input, trajectory), Result.Working)
+        self.assertGreater(trajectory.independent_min_durations[0], 0.0)
+        self.input.enabled = [False]
+        self.assertEqual(otg.calculate(self.input, trajectory), Result.Working)
+        self.assertEqual(trajectory.independent_min_durations, [0.0])
+        self.assertEqual(trajectory.duration, 0.0)
+
     def test_invalid_dimensions(self):
         self.input.current_position = []
         with self.assertRaises(RuckigError):

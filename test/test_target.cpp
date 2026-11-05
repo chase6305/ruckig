@@ -2,6 +2,8 @@
 #include <doctest/doctest.h>
 
 #include <deque>
+#include <cstring>
+#include <new>
 #include <random>
 #include <optional>
 #include "randomizer.hpp"
@@ -296,6 +298,38 @@ TEST_CASE("trajectory") {
     CHECK( independent_min_durations[0] == doctest::Approx(output.trajectory.get_duration()) );
     CHECK( independent_min_durations[1] == doctest::Approx(0.0) );
     CHECK( independent_min_durations[2] == doctest::Approx(0.0) );
+}
+
+TEST_CASE("output-is-initialized-before-first-update") {
+    const auto check = []<class Output, class... Args>(Args... args) {
+        alignas(Output) unsigned char storage[sizeof(Output)];
+        std::memset(storage, 0xA5, sizeof(storage));
+        Output* output;
+        if constexpr (sizeof...(Args) == 0) {
+            output = ::new (static_cast<void*>(storage)) Output;
+        } else {
+            output = ::new (static_cast<void*>(storage)) Output(args...);
+        }
+        const double zero = 0.0;
+        // Compare object representations without reading uninitialized doubles
+        // in a regressed implementation. Pre-filled storage makes this reliable.
+        CHECK(std::memcmp(&output->calculation_duration, &zero, sizeof(zero)) == 0);
+        for (size_t dof = 0; dof < output->degrees_of_freedom; ++dof) {
+            CHECK(std::memcmp(&output->new_position[dof], &zero, sizeof(zero)) == 0);
+            CHECK(std::memcmp(&output->new_velocity[dof], &zero, sizeof(zero)) == 0);
+            CHECK(std::memcmp(&output->new_acceleration[dof], &zero, sizeof(zero)) == 0);
+            CHECK(std::memcmp(&output->new_jerk[dof], &zero, sizeof(zero)) == 0);
+        }
+        output->~Output();
+    };
+    check.template operator()<OutputParameter<3>>();
+    check.template operator()<OutputParameter<>>(3);
+    check.template operator()<OutputParameter<0, MinimalRuntimeVector>>(3);
+#ifdef WITH_CLOUD_CLIENT
+    check.template operator()<OutputParameter<3>>(2);
+    check.template operator()<OutputParameter<>>(3, 2);
+    check.template operator()<OutputParameter<0, MinimalRuntimeVector>>(3, 2);
+#endif
 }
 
 TEST_CASE("vector-dimensions") {
@@ -668,6 +702,10 @@ TEST_CASE("enabled") {
     result = ruckig.update(input, output);
     CHECK( result == Result::Working );
     CHECK( output.trajectory.get_duration() == doctest::Approx(3.6578610221) );
+    const auto independent = output.trajectory.get_independent_min_durations();
+    CHECK( independent[0] == 0.0 );
+    CHECK( independent[1] == 0.0 );
+    CHECK( independent[2] > 0.0 );
 }
 
 TEST_CASE("phase-synchronization") {

@@ -272,6 +272,7 @@ public:
                 p.a.back() = inp.current_acceleration[dof];
                 p.t_sum.back() = 0.0;
                 blocks[dof].t_min = 0.0;
+                traj.independent_min_durations[dof] = 0.0;
                 blocks[dof].a = std::nullopt;
                 blocks[dof].b = std::nullopt;
                 blocks[dof].p_min = p;
