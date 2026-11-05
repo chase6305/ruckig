@@ -3,10 +3,12 @@
 #include <algorithm>
 #include <array>
 #include <chrono>
+#include <cmath>
 #include <iostream>
 #include <limits>
 #include <memory>
 #include <tuple>
+#include <utility>
 #include <vector>
 
 #include <nlohmann/json.hpp>
@@ -62,6 +64,32 @@ class WaypointsCalculator {
         for (size_t i = 0; i < vector.size(); ++i) {
             vector_to_json(j_vector[i], vector[i]);
         }
+    }
+
+    // std::array deserialization ignores extra elements, so check the wire sizes.
+    static bool has_profile_array_sizes(const nlohmann::json& profile) {
+        for (const auto* key: {"t", "t_sum", "j"}) {
+            const auto& values = profile.at(key);
+            if (!values.is_array() || values.size() != 7) {
+                return false;
+            }
+        }
+        for (const auto* key: {"a", "v", "p"}) {
+            const auto& values = profile.at(key);
+            if (!values.is_array() || values.size() != 8) {
+                return false;
+            }
+        }
+        for (const auto* key: {"brake", "accel"}) {
+            const auto& subprofile = profile.at(key);
+            for (const auto* state: {"t", "j", "a", "v", "p"}) {
+                const auto& values = subprofile.at(state);
+                if (!values.is_array() || values.size() != 2) {
+                    return false;
+                }
+            }
+        }
+        return true;
     }
 
     CloudClient client;
@@ -143,32 +171,78 @@ public:
         const auto result = client.post(params, throw_error);
 
         was_interrupted = false;
-        if (result.is_null() || result.is_discarded()) {
-            return Result::Error;
-        }
-        traj.degrees_of_freedom = input.degrees_of_freedom;
-        traj.resize(result["profiles"].size() - 1);
-
-        traj.continue_calculation_counter = 0;
-        traj.duration = result["duration"].template get<double>();
-        traj.cumulative_times = result["cumulative_times"].template get<std::vector<double>>();
-
-        if (!result["message"].empty()) {
-            std::cout << "[ruckig] " << result["message"].template get<std::string>() << std::endl;
-        }
-
-        if (result["result"] == "Result.Error") {
-            return Result::Error;
-
-        } else if (result["result"] == "Result.ErrorInvalidInput") {
-            return Result::ErrorInvalidInput;
-        }
-
-        for (size_t i = 0; i < result["profiles"].size(); ++i) {
-            for (size_t dof = 0; dof < traj.degrees_of_freedom; ++dof) {
-                auto& p = result["profiles"][i][dof];
-                traj.profiles[i][dof] = p.template get<Profile>();
+        const auto invalid_response = []() -> Result {
+            if constexpr (throw_error) {
+                throw RuckigError("invalid trajectory response from cloud API.");
             }
+            return Result::Error;
+        };
+        if (result.is_null() || result.is_discarded()) {
+            return invalid_response();
+        }
+
+        try {
+            const auto status = result.at("result").template get<std::string>();
+            const auto message = result.find("message");
+            if (message != result.end() && message->is_string() && !message->empty()) {
+                std::cout << "[ruckig] " << message->template get_ref<const std::string&>() << std::endl;
+            }
+            if (status == "Result.Error") {
+                return Result::Error;
+            } else if (status == "Result.ErrorInvalidInput") {
+                return Result::ErrorInvalidInput;
+            } else if (status != "Result.Working") {
+                return invalid_response();
+            }
+
+            const auto& profiles = result.at("profiles");
+            const auto duration = result.at("duration").template get<double>();
+            auto cumulative_times = result.at("cumulative_times").template get<std::vector<double>>();
+            // Duration and the last cumulative time describe the same section boundary.
+            if (!profiles.is_array() || profiles.empty() || cumulative_times.size() != profiles.size()
+                || !std::isfinite(duration) || duration < 0.0
+                || !std::all_of(cumulative_times.begin(), cumulative_times.end(), [](double t) { return std::isfinite(t) && t >= 0.0; })
+                || !std::is_sorted(cumulative_times.begin(), cumulative_times.end()) || cumulative_times.back() != duration) {
+                return invalid_response();
+            }
+            for (const auto& section: profiles) {
+                if (!section.is_array() || section.size() != input.degrees_of_freedom) {
+                    return invalid_response();
+                }
+            }
+
+            if (message != result.end() && !message->is_string()) {
+                return invalid_response();
+            }
+
+            traj.degrees_of_freedom = input.degrees_of_freedom;
+            traj.resize(profiles.size() - 1);
+            traj.continue_calculation_counter = 0;
+            traj.duration = duration;
+            traj.cumulative_times = std::move(cumulative_times);
+            for (size_t i = 0; i < profiles.size(); ++i) {
+                for (size_t dof = 0; dof < traj.degrees_of_freedom; ++dof) {
+                    const auto& data = profiles.at(i).at(dof);
+                    if (!has_profile_array_sizes(data)) {
+                        return invalid_response();
+                    }
+                    auto profile = data.template get<Profile>();
+                    if (!std::all_of(profile.t.begin(), profile.t.end(), [](double t) { return std::isfinite(t) && t >= 0.0; })
+                        || !std::all_of(profile.t_sum.begin(), profile.t_sum.end(), [](double t) { return std::isfinite(t) && t >= 0.0; })
+                        || !std::is_sorted(profile.t_sum.begin(), profile.t_sum.end())
+                        || !std::isfinite(profile.brake.duration) || profile.brake.duration < 0.0
+                        || !std::isfinite(profile.accel.duration) || profile.accel.duration < 0.0) {
+                        return invalid_response();
+                    }
+                    if (profile.brake.duration > 0.0
+                        && !std::all_of(profile.brake.t.begin(), profile.brake.t.end(), [](double t) { return std::isfinite(t) && t >= 0.0; })) {
+                        return invalid_response();
+                    }
+                    traj.profiles[i][dof] = std::move(profile);
+                }
+            }
+        } catch (const nlohmann::json::exception&) {
+            return invalid_response();
         }
 
         return Result::Working;

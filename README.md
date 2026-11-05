@@ -257,6 +257,8 @@ ErrorSynchronizationCalculation | -111
 
 With the default C++ `Ruckig` configuration, cloud connection failures, non-200 HTTP responses, and JSON parsing failures return `Result::Error`. `RuckigThrow` and Python continue to report these failures with exceptions.
 
+Malformed cloud trajectory data follows the same error/exception policy and leaves no usable trajectory. Responses must have consistent section dimensions and profile array lengths. Section and phase end times must be finite, nonnegative, and ordered; the final section end must equal the reported duration. Filtered or merged responses may contain fewer sections than the requested waypoint chain. These checks validate the response structure for sampling; they do not repeat the server's kinematic optimization.
+
 
 ### Output Parameter
 
