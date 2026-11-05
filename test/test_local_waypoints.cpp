@@ -717,6 +717,69 @@ TEST_CASE("automatic-endpoint-waypoints-preserve-initial-braking") {
     }
 }
 
+TEST_CASE("automatic-reference-crossings-use-alternate-axes") {
+    Ruckig<2> otg;
+    for (double velocity: {-1.0, -1.5}) {
+        for (double acceleration: {0.0, -0.5}) {
+            for (size_t count: {1, 3}) {
+                auto input = make_input<2>();
+                input.current_velocity = {velocity, 0.0};
+                input.current_acceleration = {acceleration, 0.0};
+                input.target_position = {0.5, 0.2};
+                input.min_position = {-10.0, -10.0};
+                input.max_position = {10.0, 10.0};
+                Trajectory<2> reference, optimized;
+                REQUIRE(otg.calculate(input, reference) == Result::Working);
+                for (size_t i = 0; i < count; ++i) {
+                    std::array<double, 2> point;
+                    reference.at_time(reference.get_duration() * (0.5 + 0.05 * i), point);
+                    input.intermediate_positions.push_back(point);
+                }
+                // The first x crossing is an earlier visit with the wrong y.
+                const auto earlier = reference.get_first_time_at_position(0, input.intermediate_positions.front()[0]);
+                REQUIRE(earlier.has_value());
+                CHECK(*earlier < reference.get_duration() * 0.5 - 1e-6);
+                std::array<double, 2> p, v, a, expected_p, expected_v, expected_a;
+                reference.at_time(*earlier, p);
+                CHECK(std::abs(p[1] - input.intermediate_positions.front()[1]) > 1e-5);
+                REQUIRE(otg.optimize_waypoints(input, optimized) == Result::Working);
+                CHECK(optimized.get_duration() == doctest::Approx(reference.get_duration()).epsilon(1e-8));
+                const auto times = optimized.get_intermediate_durations();
+                REQUIRE(times.size() == count + 1);
+                for (size_t i = 0; i < count; ++i) {
+                    const double time = reference.get_duration() * (0.5 + 0.05 * i);
+                    CHECK(times[i] == doctest::Approx(time).epsilon(1e-8));
+                    if (i > 0) {
+                        CHECK(times[i] > times[i - 1]);
+                    }
+                    reference.at_time(time, expected_p, expected_v, expected_a);
+                    optimized.at_time(times[i], p, v, a);
+                    for (size_t d = 0; d < 2; ++d) {
+                        CHECK(p[d] == doctest::Approx(input.intermediate_positions[i][d]).epsilon(1e-8));
+                        CHECK(v[d] == doctest::Approx(expected_v[d]).epsilon(1e-8));
+                        CHECK(a[d] == doctest::Approx(expected_a[d]).epsilon(1e-8));
+                    }
+                }
+                check_sampled_limits(input, optimized);
+
+                // All input positions fit this bound, but the initial reversal
+                // must cross it. A recovered reference still needs bound checks.
+                std::array<Bound, 2> extrema;
+                reference.get_position_extrema(extrema);
+                const double minimum = extrema[0].min;
+                double waypoint_minimum = 0.0;
+                for (const auto& point: input.intermediate_positions) {
+                    waypoint_minimum = std::min(waypoint_minimum, point[0]);
+                }
+                REQUIRE(minimum < waypoint_minimum - 1e-3);
+                input.min_position[0] = (minimum + waypoint_minimum) / 2;
+                CHECK(otg.optimize_waypoints(input, optimized) == Result::ErrorPositionalLimits);
+                CHECK_THROWS_AS(optimized.at_time(0.0, p), RuckigError);
+            }
+        }
+    }
+}
+
 TEST_CASE("local-filter-one-axis-extrema-and-finite-guards") {
     Ruckig<1> otg;
     InputParameter<1> input;

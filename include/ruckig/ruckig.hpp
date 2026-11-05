@@ -555,32 +555,42 @@ public:
             if (synchronization == Synchronization::Time) {
                 lower_bound = reference.duration;
             }
-            double time = 0.0;
-            bool visits_all = true;
-            for (size_t i = 0; i < count; ++i) {
-                const auto crossing = reference.get_first_time_at_position(crossing_dof, input.intermediate_positions[i][crossing_dof], time);
-                if (!crossing || *crossing > reference.duration) {
-                    visits_all = false;
-                    break;
-                }
-                time = *crossing;
-                reference.at_time(time, p_sample, v_seed[i], a_seed[i]);
-                for (size_t d = 0; d < degrees_of_freedom; ++d) {
-                    if (std::abs(p_sample[d] - input.intermediate_positions[i][d]) > 1e-8) {
-                        visits_all = false;
-                        break;
+            const auto visits_reference = [&](size_t dof) {
+                double time = 0.0;
+                for (size_t i = 0; i < count; ++i) {
+                    const auto crossing = reference.get_first_time_at_position(dof, input.intermediate_positions[i][dof], time);
+                    if (!crossing || *crossing > reference.duration) {
+                        return false;
+                    }
+                    time = *crossing;
+                    reference.at_time(time, p_sample, v_seed[i], a_seed[i]);
+                    for (size_t d = 0; d < degrees_of_freedom; ++d) {
+                        if (std::abs(p_sample[d] - input.intermediate_positions[i][d]) > 1e-8) {
+                            return false;
+                        }
                     }
                 }
-                if (!visits_all) {
-                    break;
-                }
-            }
-            if (visits_all) {
+                return true;
+            };
+            if (visits_reference(crossing_dof)) {
                 // Re-solve every segment and enforce the original position bounds.
                 try_seed(v_seed, a_seed);
                 if (found && (best.duration == 0.0 || (lower_bound > 0.0 && best.duration <= lower_bound + 1e-9 * std::max(1.0, lower_bound)))) {
                     trajectory = std::move(best);
                     return Result::Working;
+                }
+            } else if (lower_bound > 0.0) {
+                // A different axis can disambiguate a coordinate crossed twice.
+                // Accept only a chain reaching the endpoint lower bound, leaving
+                // the original seed and refinement path unchanged otherwise.
+                for (size_t d = 0; d < degrees_of_freedom; ++d) {
+                    if (d != crossing_dof && visits_reference(d)
+                        && evaluator.calculate_waypoints(input, candidate, v_seed, a_seed) == Result::Working
+                        && (!found || candidate.duration <= best.duration)
+                        && candidate.duration <= lower_bound + 1e-9 * std::max(1.0, lower_bound)) {
+                        trajectory = std::move(candidate);
+                        return Result::Working;
+                    }
                 }
             }
         }

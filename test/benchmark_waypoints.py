@@ -21,6 +21,7 @@ def main():
         ('uneven-1d', [[0.25], [1.0]], [3.0]),
         ('repeat-1d', [[1.0], [1.0], [2.0]], [3.0]),
         ('endpoint-2d', [[0.0, 0.0], [1.0, 1.0], [2.0, 0.5], [3.0, 0.0]], [3.0, 0.0]),
+        ('reference-2d', [[-23.0 / 96.0, 0.1]], [0.5, 0.2]),
         ('arc-2d-19', [[math.sin(math.pi * k / 40), 1 - math.cos(math.pi * k / 40)] for k in range(1, 20)], [1.0, 1.0]),
         ('arc-2d-39', [[math.sin(math.pi * k / 80), 1 - math.cos(math.pi * k / 80)] for k in range(1, 40)], [1.0, 1.0]),
         ('arc-6d-19', [[math.sin(math.pi * k / 40), 1 - math.cos(math.pi * k / 40)] * 3 for k in range(1, 20)], [1.0] * 6),
@@ -36,6 +37,8 @@ def main():
         inp.target_position = target
         if name == 'endpoint-2d':
             inp.current_velocity = inp.target_velocity = [1.0, 0.0]
+        elif name == 'reference-2d':
+            inp.current_velocity = [-1.0, 0.0]
         inp.intermediate_positions = points
         inp.max_velocity = inp.max_acceleration = [2.0] * dofs
         inp.max_jerk = [4.0] * dofs
