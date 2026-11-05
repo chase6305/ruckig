@@ -17,10 +17,13 @@ def main():
         ('curve-2d', [[0.4, 0.2], [0.8, 0.6], [1.4, 0.4], [2.0, 0.8]], [3.0, 1.5]),
         ('zigzag-2d', [[0.5, 1.0], [1.0, 0.0], [1.5, 1.0]], [2.0, 0.0]),
         ('reverse-1d', [[1.0]], [0.0]),
+        ('reverse-1d-many', [[1.0], [-1.0], [1.0], [-1.0]], [0.0]),
         ('uneven-1d', [[0.25], [1.0]], [3.0]),
         ('repeat-1d', [[1.0], [1.0], [2.0]], [3.0]),
         ('arc-2d-19', [[math.sin(math.pi * k / 40), 1 - math.cos(math.pi * k / 40)] for k in range(1, 20)], [1.0, 1.0]),
         ('arc-2d-39', [[math.sin(math.pi * k / 80), 1 - math.cos(math.pi * k / 80)] for k in range(1, 40)], [1.0, 1.0]),
+        ('arc-6d-19', [[math.sin(math.pi * k / 40), 1 - math.cos(math.pi * k / 40)] * 3 for k in range(1, 20)], [1.0] * 6),
+        ('arc-6d-39', [[math.sin(math.pi * k / 80), 1 - math.cos(math.pi * k / 80)] * 3 for k in range(1, 40)], [1.0] * 6),
         ('sine-2d-19', [[3.0 * k / 20, 0.1 * math.sin(2 * math.pi * k / 20)] for k in range(1, 20)], [3.0, 0.0]),
         ('sine-2d-39', [[3.0 * k / 40, 0.1 * math.sin(2 * math.pi * k / 40)] for k in range(1, 40)], [3.0, 0.0]),
     ]

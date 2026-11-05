@@ -761,35 +761,54 @@ public:
                     state_input.current_velocity[d] = state_input.target_velocity[d] = velocities[i][d];
                     state_input.current_acceleration[d] = state_input.target_acceleration[d] = accelerations[i][d];
                 }
-                if (state_input.template validate<false>(true, true)
-                    && solve_section(i, left_trial) == Result::Working && solve_section(i + 1, right_trial) == Result::Working) {
-                    const double next = total - sections[i].duration - sections[i + 1].duration + left_trial.duration + right_trial.duration;
-                    if (std::isfinite(next) && next <= 7.6e3 && next < total - 1e-10 * std::max(1.0, total)) {
-                        sections[i] = left_trial;
-                        sections[i + 1] = right_trial;
-                        total = next;
-                        return;
+                if (state_input.template validate<false>(true, true) && solve_section(i, left_trial) == Result::Working) {
+                    // The right section's nonnegative duration cannot lower this bound.
+                    const double best_possible = total - sections[i].duration - sections[i + 1].duration + left_trial.duration;
+                    if (best_possible < total - 1e-10 * std::max(1.0, total) && solve_section(i + 1, right_trial) == Result::Working) {
+                        const double next = total - sections[i].duration - sections[i + 1].duration + left_trial.duration + right_trial.duration;
+                        if (std::isfinite(next) && next <= 7.6e3 && next < total - 1e-10 * std::max(1.0, total)) {
+                            sections[i] = left_trial;
+                            sections[i + 1] = right_trial;
+                            total = next;
+                            return;
+                        }
                     }
                 }
                 velocities[i] = old_v;
                 accelerations[i] = old_a;
             };
+            // Neighbors stay fixed during one waypoint visit, and accepted pair cost
+            // only decreases. Reuse the four joint trials in the coordinate search.
+            std::array<Vector<double>, 4> joint_v, joint_a;
+            const auto joint_seen = [&](const Vector<double>& v, const Vector<double>& a) {
+                for (size_t trial = 0; trial < 4; ++trial) {
+                    if (joint_v[trial] == v && joint_a[trial] == a) {
+                        return true;
+                    }
+                }
+                return false;
+            };
             auto v = zero, a = zero;
             for (size_t iteration = 0; iteration < max_iterations; ++iteration) {
                 const double step = std::ldexp(0.5, -static_cast<int>(iteration));
                 for (size_t i = 0; i < count; ++i) {
+                    size_t joint_count = 0;
                     for (double sign: {-1.0, 1.0}) {
                         v = velocities[i];
                         a = accelerations[i];
                         for (size_t d = 0; d < degrees_of_freedom; ++d) {
                             v[d] = std::clamp(v[d] + sign * step * direction[i][d] * velocity_scale[i][d], v_lower[i][d], v_upper[i][d]);
                         }
+                        joint_v[joint_count] = v;
+                        joint_a[joint_count++] = a;
                         try_state(i, v, a);
                         v = velocities[i];
                         a = accelerations[i];
                         for (size_t d = 0; d < degrees_of_freedom; ++d) {
                             a[d] = std::clamp(a[d] + sign * step * outgoing_direction[i][d] * acceleration_scale[i][d], a_lower[i][d], a_upper[i][d]);
                         }
+                        joint_v[joint_count] = v;
+                        joint_a[joint_count++] = a;
                         try_state(i, v, a);
                     }
                     for (size_t d = 0; d < degrees_of_freedom; ++d) {
@@ -797,11 +816,15 @@ public:
                             v = velocities[i];
                             a = accelerations[i];
                             v[d] = std::clamp(v[d] + sign * step * velocity_scale[i][d], v_lower[i][d], v_upper[i][d]);
-                            try_state(i, v, a);
+                            if (!joint_seen(v, a)) {
+                                try_state(i, v, a);
+                            }
                             v = velocities[i];
                             a = accelerations[i];
                             a[d] = std::clamp(a[d] + sign * step * acceleration_scale[i][d], a_lower[i][d], a_upper[i][d]);
-                            try_state(i, v, a);
+                            if (!joint_seen(v, a)) {
+                                try_state(i, v, a);
+                            }
                         }
                     }
                 }
