@@ -482,9 +482,10 @@ public:
         }
         // Boundary points can reuse the prescribed endpoint state. Consecutive
         // interior coincident points share one optimized state variable.
-        if (input.intermediate_positions.front() == input.current_position
+        const bool needs_waypoint_compaction = input.intermediate_positions.front() == input.current_position
             || input.intermediate_positions.back() == input.target_position
-            || std::adjacent_find(input.intermediate_positions.begin(), input.intermediate_positions.end()) != input.intermediate_positions.end()) {
+            || std::adjacent_find(input.intermediate_positions.begin(), input.intermediate_positions.end()) != input.intermediate_positions.end();
+        if (needs_waypoint_compaction) {
             size_t first = 0, last = count;
             while (first < last && input.intermediate_positions[first] == input.current_position) {
                 ++first;
@@ -566,6 +567,7 @@ public:
         }
         States v_seed(count, zero), a_seed(count, zero);
         auto p_sample = zero;
+        bool regularization_attempted = false;
         for (const auto synchronization: {Synchronization::Time, Synchronization::Phase}) {
             reference_input.synchronization = synchronization;
             if (evaluator.calculate(reference_input, reference) != Result::Working) {
@@ -646,6 +648,34 @@ public:
                 }
                 return true;
             };
+            const auto try_regularized_reference = [&]() {
+                if (regularization_attempted || needs_waypoint_compaction || lower_bound <= 0.0) {
+                    return false;
+                }
+                regularization_attempted = true;
+                // Move free intermediate states off numerically degenerate section
+                // boundaries by at most a few hundred machine epsilons. Both true
+                // endpoints and inherited coincident states remain prescribed, and
+                // every trial still passes the complete original chain validation.
+                States v_trial = v_seed, a_trial = a_seed;
+                for (size_t trial = 0; trial < 3; ++trial) {
+                    const double scale = trial == 0 ? 1.0 - 1e-14
+                        : (trial == 1 ? std::nextafter(1.0, 0.0) : 1.0 - 1e-13);
+                    for (size_t i = 0; i < count; ++i) {
+                        for (size_t d = 0; d < degrees_of_freedom; ++d) {
+                            v_trial[i][d] = v_seed[i][d] * scale;
+                            a_trial[i][d] = trial == 1 ? a_seed[i][d] : a_seed[i][d] * scale;
+                        }
+                    }
+                    if (evaluator.calculate_waypoints(input, candidate, v_trial, a_trial) == Result::Working
+                        && (!found || candidate.duration < best.duration)
+                        && candidate.duration <= lower_bound + 1e-9 * std::max(1.0, lower_bound)) {
+                        trajectory = std::move(candidate);
+                        return true;
+                    }
+                }
+                return false;
+            };
             if (visits_reference(crossing_dof)) {
                 // Re-solve every segment and enforce the original position bounds.
                 try_seed(v_seed, a_seed);
@@ -653,27 +683,38 @@ public:
                     trajectory = std::move(best);
                     return Result::Working;
                 }
+                if (try_regularized_reference()) {
+                    return Result::Working;
+                }
             } else if (lower_bound > 0.0) {
                 // A different axis can disambiguate a coordinate crossed twice.
                 // Accept only a chain reaching the endpoint lower bound, leaving
                 // the original seed and refinement path unchanged otherwise.
                 for (size_t d = 0; d < degrees_of_freedom; ++d) {
-                    if (d != crossing_dof && visits_reference(d)
-                        && evaluator.calculate_waypoints(input, candidate, v_seed, a_seed) == Result::Working
-                        && (!found || candidate.duration <= best.duration)
-                        && candidate.duration <= lower_bound + 1e-9 * std::max(1.0, lower_bound)) {
-                        trajectory = std::move(candidate);
-                        return Result::Working;
+                    if (d != crossing_dof && visits_reference(d)) {
+                        if (evaluator.calculate_waypoints(input, candidate, v_seed, a_seed) == Result::Working
+                            && (!found || candidate.duration <= best.duration)
+                            && candidate.duration <= lower_bound + 1e-9 * std::max(1.0, lower_bound)) {
+                            trajectory = std::move(candidate);
+                            return Result::Working;
+                        }
+                        if (try_regularized_reference()) {
+                            return Result::Working;
+                        }
                     }
                 }
                 // The original first-crossing attempts did not recover the reference.
                 for (size_t d = 0; d < degrees_of_freedom; ++d) {
-                    if (visits_reference.template operator()<true>(d)
-                        && evaluator.calculate_waypoints(input, candidate, v_seed, a_seed) == Result::Working
-                        && (!found || candidate.duration <= best.duration)
-                        && candidate.duration <= lower_bound + 1e-9 * std::max(1.0, lower_bound)) {
-                        trajectory = std::move(candidate);
-                        return Result::Working;
+                    if (visits_reference.template operator()<true>(d)) {
+                        if (evaluator.calculate_waypoints(input, candidate, v_seed, a_seed) == Result::Working
+                            && (!found || candidate.duration <= best.duration)
+                            && candidate.duration <= lower_bound + 1e-9 * std::max(1.0, lower_bound)) {
+                            trajectory = std::move(candidate);
+                            return Result::Working;
+                        }
+                        if (try_regularized_reference()) {
+                            return Result::Working;
+                        }
                     }
                 }
             }
