@@ -1,7 +1,7 @@
 import math
 import unittest
 
-from ruckig import InputParameter, OutputParameter, Result, Ruckig, RuckigError, Trajectory
+from ruckig import InputParameter, OutputParameter, Profile, Result, Ruckig, RuckigError, Trajectory
 
 
 class WrapperRegressionTest(unittest.TestCase):
@@ -26,6 +26,16 @@ class WrapperRegressionTest(unittest.TestCase):
         for i, time in enumerate(times):
             self.assertEqual((positions[i], velocities[i], accelerations[i]), trajectory.at_time(time))
         self.assertEqual(trajectory.at_times([]), ([], [], []))
+
+    def test_profile_metadata_enums(self):
+        otg, trajectory = Ruckig(1), Trajectory(1)
+        for target, direction in ((1.0, Profile.Direction.UP), (-1.0, Profile.Direction.DOWN)):
+            self.input.target_position = [target]
+            self.assertEqual(otg.calculate(self.input, trajectory), Result.Working)
+            profile = trajectory.profiles[0][0]
+            self.assertEqual(profile.direction, direction)
+            self.assertIsInstance(profile.limits, Profile.ReachedLimits)
+            self.assertIsInstance(profile.control_signs, Profile.ControlSigns)
 
     def test_position_bounds(self):
         trajectory = Trajectory(1)
