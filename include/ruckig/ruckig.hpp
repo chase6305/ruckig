@@ -567,7 +567,7 @@ public:
         }
         States v_seed(count, zero), a_seed(count, zero);
         auto p_sample = zero;
-        bool regularization_attempted = false;
+        States reference_velocities, reference_accelerations;
         for (const auto synchronization: {Synchronization::Time, Synchronization::Phase}) {
             reference_input.synchronization = synchronization;
             if (evaluator.calculate(reference_input, reference) != Result::Working) {
@@ -648,33 +648,11 @@ public:
                 }
                 return true;
             };
-            const auto try_regularized_reference = [&]() {
-                if (regularization_attempted || needs_waypoint_compaction || lower_bound <= 0.0) {
-                    return false;
+            const auto remember_reference_seed = [&]() {
+                if (reference_velocities.empty() && !needs_waypoint_compaction && lower_bound > 0.0) {
+                    reference_velocities = v_seed;
+                    reference_accelerations = a_seed;
                 }
-                regularization_attempted = true;
-                // Move free intermediate states off numerically degenerate section
-                // boundaries by at most a few hundred machine epsilons. Both true
-                // endpoints and inherited coincident states remain prescribed, and
-                // every trial still passes the complete original chain validation.
-                States v_trial = v_seed, a_trial = a_seed;
-                for (size_t trial = 0; trial < 3; ++trial) {
-                    const double scale = trial == 0 ? 1.0 - 1e-14
-                        : (trial == 1 ? std::nextafter(1.0, 0.0) : 1.0 - 1e-13);
-                    for (size_t i = 0; i < count; ++i) {
-                        for (size_t d = 0; d < degrees_of_freedom; ++d) {
-                            v_trial[i][d] = v_seed[i][d] * scale;
-                            a_trial[i][d] = trial == 1 ? a_seed[i][d] : a_seed[i][d] * scale;
-                        }
-                    }
-                    if (evaluator.calculate_waypoints(input, candidate, v_trial, a_trial) == Result::Working
-                        && (!found || candidate.duration < best.duration)
-                        && candidate.duration <= lower_bound + 1e-9 * std::max(1.0, lower_bound)) {
-                        trajectory = std::move(candidate);
-                        return true;
-                    }
-                }
-                return false;
             };
             if (visits_reference(crossing_dof)) {
                 // Re-solve every segment and enforce the original position bounds.
@@ -683,9 +661,7 @@ public:
                     trajectory = std::move(best);
                     return Result::Working;
                 }
-                if (try_regularized_reference()) {
-                    return Result::Working;
-                }
+                remember_reference_seed();
             } else if (lower_bound > 0.0) {
                 // A different axis can disambiguate a coordinate crossed twice.
                 // Accept only a chain reaching the endpoint lower bound, leaving
@@ -698,9 +674,7 @@ public:
                             trajectory = std::move(candidate);
                             return Result::Working;
                         }
-                        if (try_regularized_reference()) {
-                            return Result::Working;
-                        }
+                        remember_reference_seed();
                     }
                 }
                 // The original first-crossing attempts did not recover the reference.
@@ -712,12 +686,35 @@ public:
                             trajectory = std::move(candidate);
                             return Result::Working;
                         }
-                        if (try_regularized_reference()) {
-                            return Result::Working;
-                        }
+                        remember_reference_seed();
                     }
                 }
             }
+        }
+        // Preserve all original reference attempts before trying bounded numerical
+        // perturbations. Coincident and inherited endpoint states are handled only
+        // through the already validated compact-chain expansion above.
+        if (!reference_velocities.empty()) {
+            // Move only free states off degenerate section boundaries, by at
+            // most a few hundred machine epsilons relative to each component.
+            for (size_t trial = 0; trial < 3; ++trial) {
+                const double scale = trial == 0 ? 1.0 - 1e-14
+                    : (trial == 1 ? std::nextafter(1.0, 0.0) : 1.0 - 1e-13);
+                for (size_t i = 0; i < count; ++i) {
+                    for (size_t d = 0; d < degrees_of_freedom; ++d) {
+                        v_seed[i][d] = reference_velocities[i][d] * scale;
+                        a_seed[i][d] = trial == 1 ? reference_accelerations[i][d] : reference_accelerations[i][d] * scale;
+                    }
+                }
+                if (evaluator.calculate_waypoints(input, candidate, v_seed, a_seed) == Result::Working
+                    && (!found || candidate.duration < best.duration)
+                    && candidate.duration <= lower_bound + 1e-9 * std::max(1.0, lower_bound)) {
+                    trajectory = std::move(candidate);
+                    return Result::Working;
+                }
+            }
+            // v_seed/a_seed are workspaces: the endpoint-motion seed below
+            // overwrites every component before either one is read again.
         }
         States velocity_scale(count, zero), acceleration_scale(count, zero);
         States v_lower(count, zero), v_upper(count, zero), a_lower(count, zero), a_upper(count, zero);
