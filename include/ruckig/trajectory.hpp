@@ -270,6 +270,17 @@ public:
         });
     }
 
+    //! Get the kinematic state directly into caller-owned contiguous buffers.
+    void at_time(double time, std::span<double> new_position, std::span<double> new_velocity, std::span<double> new_acceleration) const {
+        if (degrees_of_freedom != new_position.size() || degrees_of_freedom != new_velocity.size() || degrees_of_freedom != new_acceleration.size()) {
+            throw RuckigError("mismatch in degrees of freedom (vector size).");
+        }
+        size_t new_section;
+        state_to_integrate_from(time, new_section, [&](size_t dof, double t, double p, double v, double a, double j) {
+            std::tie(new_position[dof], new_velocity[dof], new_acceleration[dof]) = integrate(t, p, v, a, j);
+        });
+    }
+
     //! Get the position at a given time
     void at_time(double time, Vector<double>& new_position) const {
         if constexpr (DOFs == 0) {

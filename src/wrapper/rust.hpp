@@ -20,11 +20,7 @@ std::unique_ptr<Trajectory> traj_new(size_t dofs, size_t waypoints) { return std
 size_t traj_get_dofs(const Trajectory& traj) { return traj.degrees_of_freedom; }
 double traj_get_duration(const Trajectory& traj) { return traj.get_duration(); }
 void traj_at_time(const Trajectory& traj, double time, double* pos, double* vel, double* acc, size_t len) {
-    std::vector<double> p(len), v(len), a(len);
-    traj.at_time(time, p, v, a);
-    std::copy(p.begin(), p.end(), pos);
-    std::copy(v.begin(), v.end(), vel);
-    std::copy(a.begin(), a.end(), acc);
+    traj.at_time(time, std::span<double>(pos, len), std::span<double>(vel, len), std::span<double>(acc, len));
 }
 
 // InputParameter

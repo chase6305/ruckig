@@ -148,16 +148,19 @@ public:
         size_t start = 0;
         size_t end = start + 2;
         size_t min_current = 1, max_current = 1;
+        std::optional<size_t> varying_dof;
+        bool use_extrema = true;
         for (; end < n_waypoints + 2; ++end) {
             const auto& pos_start = (start == 0) ? input.current_position : input.intermediate_positions[start - 1];
             const auto& pos_end = (end == n_waypoints + 1) ? input.target_position : input.intermediate_positions[end - 1];
 
-            // The 1D tests are monotone in position, so the interior extrema suffice.
-            // In multiple dimensions retain the full point-wise intersection checks.
+            // Fixed interior coordinates impose one common interval in t. With
+            // at most one varying coordinate, only its extrema need testing.
             bool are_all_below {true};
-            const size_t current_count = degrees_of_freedom == 1 ? 1 + (min_current != max_current) : end - start - 1;
+            const bool test_extrema = degrees_of_freedom == 1 || use_extrema;
+            const size_t current_count = test_extrema ? 1 + (min_current != max_current) : end - start - 1;
             for (size_t k = 0; k < current_count; ++k) {
-                const size_t current = degrees_of_freedom == 1 ? (k == 0 ? min_current : max_current) : start + 1 + k;
+                const size_t current = test_extrema ? (k == 0 ? min_current : max_current) : start + 1 + k;
                 const auto& pos_current = input.intermediate_positions[current - 1];
 
                 // Is there a point t on the line that holds the threshold?
@@ -200,20 +203,36 @@ public:
             }
 
             is_active[end - 2] = !are_all_below;
-            if (degrees_of_freedom == 1) {
-                if (!are_all_below) {
-                    min_current = max_current = end;
-                } else {
-                    if (pos_end[0] < input.intermediate_positions[min_current - 1][0]) {
+            if (!are_all_below) {
+                start = end - 1;
+                min_current = max_current = end;
+                if (degrees_of_freedom > 1) {
+                    varying_dof.reset();
+                    use_extrema = true;
+                }
+            } else if (test_extrema) {
+                // This end becomes an interior point of the next candidate.
+                if (degrees_of_freedom > 1) {
+                    const auto& representative = input.intermediate_positions[min_current - 1];
+                    for (size_t dof = 0; dof < degrees_of_freedom; ++dof) {
+                        if ((!varying_dof || dof != *varying_dof) && pos_end[dof] != representative[dof]) {
+                            if (varying_dof) {
+                                use_extrema = false;
+                                break;
+                            }
+                            varying_dof = dof;
+                        }
+                    }
+                }
+                if (degrees_of_freedom == 1 || use_extrema) {
+                    const size_t extrema_dof = degrees_of_freedom == 1 ? 0 : varying_dof.value_or(0);
+                    if (pos_end[extrema_dof] < input.intermediate_positions[min_current - 1][extrema_dof]) {
                         min_current = end;
                     }
-                    if (pos_end[0] > input.intermediate_positions[max_current - 1][0]) {
+                    if (pos_end[extrema_dof] > input.intermediate_positions[max_current - 1][extrema_dof]) {
                         max_current = end;
                     }
                 }
-            }
-            if (!are_all_below) {
-                start = end - 1;
             }
         }
 
@@ -555,17 +574,72 @@ public:
             if (synchronization == Synchronization::Time) {
                 lower_bound = reference.duration;
             }
-            const auto visits_reference = [&](size_t dof) {
+            // Keep the ordinary matcher separate from the rare phase-root scan.
+            const auto visits_reference = [&]<bool all_crossings = false>(size_t dof) {
                 double time = 0.0;
                 for (size_t i = 0; i < count; ++i) {
+                    const auto matches = [&](double candidate_time) {
+                        if (candidate_time > reference.duration || (all_crossings && candidate_time < time)) {
+                            return false;
+                        }
+                        reference.at_time(candidate_time, p_sample, v_seed[i], a_seed[i]);
+                        for (size_t d = 0; d < degrees_of_freedom; ++d) {
+                            if (std::abs(p_sample[d] - input.intermediate_positions[i][d]) > 1e-8) {
+                                return false;
+                            }
+                        }
+                        time = candidate_time;
+                        return true;
+                    };
                     const auto crossing = reference.get_first_time_at_position(dof, input.intermediate_positions[i][dof], time);
-                    if (!crossing || *crossing > reference.duration) {
-                        return false;
+                    if (crossing && matches(*crossing)) {
+                        continue;
                     }
-                    time = *crossing;
-                    reference.at_time(time, p_sample, v_seed[i], a_seed[i]);
-                    for (size_t d = 0; d < degrees_of_freedom; ++d) {
-                        if (std::abs(p_sample[d] - input.intermediate_positions[i][d]) > 1e-8) {
+                    if constexpr (!all_crossings) {
+                        return false;
+                    } else {
+                        bool visited = false;
+                        const auto try_step = [&](double start, double end, double p, double v, double a, double j) {
+                            end = std::min(end, reference.duration);
+                            const double earliest = std::max(0.0, time - start);
+                            if (visited || end < start || earliest > end - start) {
+                                return;
+                            }
+                            const double position = input.intermediate_positions[i][dof];
+                            const auto try_at = [&](double t) {
+                                return std::abs(std::get<0>(integrate(t, p, v, a, j)) - position) < 1e-9 && matches(start + t);
+                            };
+                            if (try_at(earliest)) {
+                                visited = true;
+                                return;
+                            }
+                            for (double t: roots::solve_cubic(j / 6, a / 2, v, p - position)) {
+                                if (earliest <= t && t <= end - start && matches(start + t)) {
+                                    visited = true;
+                                    return;
+                                }
+                            }
+                            visited = try_at(end - start);
+                        };
+                        // Match time sampling's local cumulative phase boundaries.
+                        const auto& profile = reference.profiles_view()[0][dof];
+                        if (profile.brake.duration > 0.0 && profile.brake.t[0] > 0.0) {
+                            try_step(0.0, std::min(profile.brake.t[0], profile.brake.duration),
+                                profile.brake.p[0], profile.brake.v[0], profile.brake.a[0], profile.brake.j[0]);
+                        }
+                        if (profile.brake.duration > 0.0 && profile.brake.t[1] > 0.0) {
+                            try_step(profile.brake.t[0], profile.brake.duration,
+                                profile.brake.p[1], profile.brake.v[1], profile.brake.a[1], profile.brake.j[1]);
+                        }
+                        for (size_t step = 0; step < 7; ++step) {
+                            if (profile.t[step] > 0.0) {
+                                try_step(profile.brake.duration + (step == 0 ? 0.0 : profile.t_sum[step - 1]),
+                                    profile.brake.duration + profile.t_sum[step], profile.p[step], profile.v[step], profile.a[step], profile.j[step]);
+                            }
+                        }
+                        try_step(profile.brake.duration + profile.t_sum.back(), reference.duration,
+                            profile.p.back(), profile.v.back(), profile.a.back(), 0.0);
+                        if (!visited) {
                             return false;
                         }
                     }
@@ -585,6 +659,16 @@ public:
                 // the original seed and refinement path unchanged otherwise.
                 for (size_t d = 0; d < degrees_of_freedom; ++d) {
                     if (d != crossing_dof && visits_reference(d)
+                        && evaluator.calculate_waypoints(input, candidate, v_seed, a_seed) == Result::Working
+                        && (!found || candidate.duration <= best.duration)
+                        && candidate.duration <= lower_bound + 1e-9 * std::max(1.0, lower_bound)) {
+                        trajectory = std::move(candidate);
+                        return Result::Working;
+                    }
+                }
+                // The original first-crossing attempts did not recover the reference.
+                for (size_t d = 0; d < degrees_of_freedom; ++d) {
+                    if (visits_reference.template operator()<true>(d)
                         && evaluator.calculate_waypoints(input, candidate, v_seed, a_seed) == Result::Working
                         && (!found || candidate.duration <= best.duration)
                         && candidate.duration <= lower_bound + 1e-9 * std::max(1.0, lower_bound)) {
