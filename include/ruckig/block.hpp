@@ -95,6 +95,14 @@ public:
                 // Both directions can produce the same short and long solutions.
                 // Keep both short endpoints so that the blocked gap is retained.
                 remove_profile<N>(valid_profiles, valid_profile_counter, 3);
+            } else if (valid_profiles[0].direction != valid_profiles[2].direction
+                && std::abs(valid_profiles[0].t_sum.back() - valid_profiles[2].t_sum.back()) < 1e-12 * std::max(1.0, valid_profiles[0].t_sum.back())
+                && std::max(valid_profiles[0].t_sum.back(), valid_profiles[2].t_sum.back()) + 1e-12 * std::max(1.0, valid_profiles[0].t_sum.back()) < std::min(valid_profiles[1].t_sum.back(), valid_profiles[3].t_sum.back())
+                && std::abs(valid_profiles[1].t_sum.back() - valid_profiles[3].t_sum.back()) > 1e-12 * std::max({1.0, valid_profiles[1].t_sum.back(), valid_profiles[3].t_sum.back()})) {
+                // A duplicate short endpoint can also occupy slots 0 and 2.
+                // Retain its earlier copy and the two distinct later endpoints.
+                remove_profile<N>(valid_profiles, valid_profile_counter,
+                    valid_profiles[0].t_sum.back() > valid_profiles[2].t_sum.back() ? 0 : 2);
             } else {
                 return false;
             }
