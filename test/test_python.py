@@ -32,6 +32,23 @@ class WrapperRegressionTest(unittest.TestCase):
         self.assertEqual(trajectory.independent_min_durations, [0.0])
         self.assertEqual(trajectory.duration, 0.0)
 
+    def test_pass_to_input_removes_all_crossed_local_waypoints(self):
+        self.input.target_position = [4.0]
+        self.input.intermediate_positions = [[1.0], [2.0], [3.0]]
+        self.input.max_velocity = self.input.max_acceleration = [2.0]
+        self.input.max_jerk = [4.0]
+        otg, output = Ruckig(1, 5.0), OutputParameter(1)
+        self.assertEqual(otg.calculate_waypoints(self.input, output.trajectory), Result.Working)
+        self.assertEqual(otg.update(output.trajectory, output), Result.Working)
+        self.assertEqual(output.new_section, 2)
+        output.pass_to_input(self.input)
+        self.assertEqual(self.input.intermediate_positions, [[3.0]])
+        output.pass_to_input(self.input)
+        self.assertEqual(self.input.intermediate_positions, [[3.0]])
+        self.assertEqual(otg.update(output.trajectory, output), Result.Finished)
+        output.pass_to_input(self.input)
+        self.assertEqual(self.input.intermediate_positions, [])
+
     def test_invalid_dimensions(self):
         self.input.current_position = []
         with self.assertRaises(RuckigError):

@@ -1,6 +1,7 @@
 #pragma once
 
 #include <array>
+#include <cmath>
 #include <iomanip>
 #include <type_traits>
 
@@ -91,10 +92,29 @@ public:
         input.current_velocity = new_velocity;
         input.current_acceleration = new_acceleration;
 
-        // Remove first intermediate waypoint if section did change
-        if (did_section_change && !input.intermediate_positions.empty()) {
-            input.intermediate_positions.erase(input.intermediate_positions.begin());
+        if (input.intermediate_positions.empty()) {
+            return;
         }
+        // Keep the flag-only behavior for manually populated or invalid outputs.
+        size_t passed = did_section_change ? 1 : 0;
+        // Explicit local chains preserve one section per original input interval.
+        if (!trajectory.local_profiles.empty() && trajectory.calculated
+            && std::isfinite(time) && time >= 0.0 && trajectory.has_valid_profile_structure()
+            && degrees_of_freedom == trajectory.degrees_of_freedom) {
+            const size_t sections = trajectory.profiles_view().size();
+            const auto times = trajectory.times_view();
+            const bool current_section = new_section == sections ? time >= trajectory.duration
+                : (new_section < sections && time < times[new_section]
+                    && (new_section == 0 || time >= times[new_section - 1]));
+            const size_t waypoints = sections - 1;
+            if (current_section && input.intermediate_positions.size() <= waypoints) {
+                const size_t remaining = new_section < waypoints ? waypoints - new_section : 0;
+                passed = input.intermediate_positions.size() > remaining
+                    ? input.intermediate_positions.size() - remaining : 0;
+            }
+        }
+        input.intermediate_positions.erase(input.intermediate_positions.begin(),
+            input.intermediate_positions.begin() + passed);
     }
 
     std::string to_string() const {
