@@ -1096,3 +1096,80 @@ TEST_CASE("later-reference-crossings-recover-zero-jerk-constant-acceleration") {
         check_sampled_limits(input, optimized);
     }
 }
+
+TEST_CASE("reference-states-can-be-regularized-without-moving-endpoints") {
+    Ruckig<2> otg;
+    for (double sign: {-1.0, 1.0}) {
+        for (auto synchronization: {Synchronization::Time, Synchronization::Phase}) {
+            auto input = make_input<2>();
+            input.current_velocity = {0.0, -sign};
+            input.target_position = {sign, 0.5 * sign};
+            input.min_position = {-10.0, -10.0};
+            input.max_position = {10.0, 10.0};
+            input.synchronization = synchronization;
+            Trajectory<2> reference, optimized;
+            REQUIRE(otg.calculate(input, reference) == Result::Working);
+            REQUIRE(reference.get_duration() == doctest::Approx(2.5));
+            std::array<double, 2> point;
+            reference.at_time(reference.get_duration() / 4.0, point);
+
+            for (bool repeated: {false, true}) {
+                input.intermediate_positions = repeated
+                    ? std::vector<std::array<double, 2>>{input.current_position, input.current_position, point, point, input.target_position, input.target_position}
+                    : std::vector<std::array<double, 2>>{point};
+                // Exact sampled states can produce a longer synchronized chain;
+                // freely chosen intermediate states can still recover the bound.
+                REQUIRE(otg.optimize_waypoints(input, optimized) == Result::Working);
+                CHECK(optimized.get_duration() == doctest::Approx(reference.get_duration()).epsilon(1e-9));
+                const auto times = optimized.get_intermediate_durations();
+                REQUIRE(times.size() == input.intermediate_positions.size() + 1);
+                if (repeated) {
+                    CHECK(times[0] == 0.0);
+                    CHECK(times[1] == 0.0);
+                    CHECK(times[2] == times[3]);
+                    CHECK(times[4] == times[5]);
+                    CHECK(times[5] == times[6]);
+                }
+                for (size_t i = 0; i < input.intermediate_positions.size(); ++i) {
+                    std::array<double, 2> p, v, a, left_p, left_v, left_a;
+                    optimized.at_time(times[i], p, v, a);
+                    optimized.at_time(std::nextafter(times[i], -std::numeric_limits<double>::infinity()), left_p, left_v, left_a);
+                    for (size_t d = 0; d < 2; ++d) {
+                        CHECK(p[d] == doctest::Approx(input.intermediate_positions[i][d]).epsilon(1e-8));
+                        CHECK(std::abs(p[d] - left_p[d]) < 1e-8);
+                        CHECK(std::abs(v[d] - left_v[d]) < 1e-8);
+                        CHECK(std::abs(a[d] - left_a[d]) < 1e-8);
+                    }
+                    if (repeated && i < 2) {
+                        CHECK(p == input.current_position);
+                        CHECK(v == input.current_velocity);
+                        CHECK(a == input.current_acceleration);
+                    }
+                }
+                std::array<double, 2> p, v, a;
+                optimized.at_time(0.0, p, v, a);
+                CHECK(p == input.current_position);
+                CHECK(v == input.current_velocity);
+                CHECK(a == input.current_acceleration);
+                optimized.at_time(optimized.get_duration(), p, v, a);
+                for (size_t d = 0; d < 2; ++d) {
+                    CHECK(p[d] == doctest::Approx(input.target_position[d]).epsilon(1e-8));
+                    CHECK(v[d] == doctest::Approx(input.target_velocity[d]).epsilon(1e-8));
+                    CHECK(a[d] == doctest::Approx(input.target_acceleration[d]).epsilon(1e-8));
+                }
+                check_sampled_limits(input, optimized);
+            }
+
+            // The point lies within this bound, but unavoidable initial braking
+            // crosses it. A regularized reference cannot bypass position checks.
+            input.intermediate_positions = {point};
+            if (sign > 0.0) {
+                input.min_position[1] = -0.47;
+            } else {
+                input.max_position[1] = 0.47;
+            }
+            CHECK(otg.optimize_waypoints(input, optimized) == Result::ErrorPositionalLimits);
+            CHECK_THROWS_AS(optimized.at_time(0.0, point), RuckigError);
+        }
+    }
+}

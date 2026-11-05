@@ -335,17 +335,33 @@ public:
             return Result::ErrorInvalidInput;
         }
         const size_t count = input.intermediate_positions.size();
+        if (input.per_section_minimum_duration) {
+            if (input.per_section_minimum_duration->size() != count + 1) {
+                return invalid("minimum duration counts must match the number of waypoint sections.");
+            }
+            for (double minimum: *input.per_section_minimum_duration) {
+                if (!std::isfinite(minimum) || minimum < 0.0) {
+                    return invalid("per-section minimum durations must be finite and non-negative.");
+                }
+            }
+        }
         if ((!intermediate_velocities.empty() && intermediate_velocities.size() != count)
             || (!intermediate_accelerations.empty() && intermediate_accelerations.size() != count)) {
             return invalid("intermediate state counts must match the number of waypoints.");
         }
         if (input.per_section_max_velocity || input.per_section_max_acceleration || input.per_section_max_jerk
             || input.per_section_min_velocity || input.per_section_min_acceleration
-            || input.per_section_max_position || input.per_section_min_position || input.per_section_minimum_duration
+            || input.per_section_max_position || input.per_section_min_position
             || input.interrupt_calculation_duration) {
             return invalid("local waypoint calculation does not support per-section limits or interruption.");
         }
         if (count == 0) {
+            if (input.per_section_minimum_duration) {
+                auto endpoint_input = input;
+                endpoint_input.per_section_minimum_duration.reset();
+                endpoint_input.minimum_duration = std::max((*input.per_section_minimum_duration)[0], input.minimum_duration.value_or(0.0));
+                return calculate(endpoint_input, trajectory);
+            }
             return calculate(input, trajectory);
         }
         if (input.control_interface != ControlInterface::Position || input.per_dof_control_interface || input.per_dof_synchronization
@@ -364,6 +380,7 @@ public:
         }
         auto section_input = input;
         section_input.intermediate_positions.clear();
+        section_input.per_section_minimum_duration.reset();
         // Validate both arrival and departure feasibility of the specified intermediate states.
         for (size_t i = 0; i < count; ++i) {
             if ((!intermediate_velocities.empty() && intermediate_velocities[i].size() != degrees_of_freedom)
@@ -401,7 +418,11 @@ public:
         }
         section_input = input;
         section_input.intermediate_positions.clear();
+        section_input.per_section_minimum_duration.reset();
         for (size_t i = 0; i <= count; ++i) {
+            if (input.per_section_minimum_duration) {
+                section_input.minimum_duration = (*input.per_section_minimum_duration)[i];
+            }
             for (size_t dof = 0; dof < degrees_of_freedom; ++dof) {
                 section_input.target_position[dof] = i == count ? input.target_position[dof] : input.intermediate_positions[i][dof];
                 section_input.target_velocity[dof] = i == count ? input.target_velocity[dof] : (intermediate_velocities.empty() ? 0.0 : intermediate_velocities[i][dof]);
@@ -411,8 +432,10 @@ public:
             if (status != Result::Working) {
                 return status;
             }
+            const double previous_duration = result.duration;
             result.duration += section.get_duration();
-            if (!std::isfinite(result.duration) || result.duration > 7.6e3) {
+            if (!std::isfinite(result.duration) || result.duration > 7.6e3
+                || (input.per_section_minimum_duration && (*input.per_section_minimum_duration)[i] > 0.0 && result.duration <= previous_duration)) {
                 return Result::ErrorTrajectoryDuration;
             }
             result.local_profiles.push_back(section.profiles[0]);
@@ -482,9 +505,10 @@ public:
         }
         // Boundary points can reuse the prescribed endpoint state. Consecutive
         // interior coincident points share one optimized state variable.
-        if (input.intermediate_positions.front() == input.current_position
+        const bool needs_waypoint_compaction = input.intermediate_positions.front() == input.current_position
             || input.intermediate_positions.back() == input.target_position
-            || std::adjacent_find(input.intermediate_positions.begin(), input.intermediate_positions.end()) != input.intermediate_positions.end()) {
+            || std::adjacent_find(input.intermediate_positions.begin(), input.intermediate_positions.end()) != input.intermediate_positions.end();
+        if (needs_waypoint_compaction) {
             size_t first = 0, last = count;
             while (first < last && input.intermediate_positions[first] == input.current_position) {
                 ++first;
@@ -494,6 +518,8 @@ public:
             }
             auto compact_input = input;
             compact_input.intermediate_positions.clear();
+            // This geometric seed is re-solved with every original interval below.
+            compact_input.per_section_minimum_duration.reset();
             std::vector<size_t> compact_indices;
             compact_indices.reserve(last - first);
             for (size_t i = first; i < last; ++i) {
@@ -548,6 +574,8 @@ public:
         // states avoid slowing down merely because a straight route is sampled densely.
         auto reference_input = input;
         reference_input.intermediate_positions.clear();
+        // Endpoint timing only proposes states; try_seed enforces the original sections.
+        reference_input.per_section_minimum_duration.reset();
         auto reference = make_trajectory();
         double lower_bound = 0.0;
         size_t crossing_dof = 0;
@@ -566,6 +594,7 @@ public:
         }
         States v_seed(count, zero), a_seed(count, zero);
         auto p_sample = zero;
+        States reference_velocities, reference_accelerations;
         for (const auto synchronization: {Synchronization::Time, Synchronization::Phase}) {
             reference_input.synchronization = synchronization;
             if (evaluator.calculate(reference_input, reference) != Result::Working) {
@@ -646,6 +675,12 @@ public:
                 }
                 return true;
             };
+            const auto remember_reference_seed = [&]() {
+                if (reference_velocities.empty() && !needs_waypoint_compaction && lower_bound > 0.0) {
+                    reference_velocities = v_seed;
+                    reference_accelerations = a_seed;
+                }
+            };
             if (visits_reference(crossing_dof)) {
                 // Re-solve every segment and enforce the original position bounds.
                 try_seed(v_seed, a_seed);
@@ -653,30 +688,60 @@ public:
                     trajectory = std::move(best);
                     return Result::Working;
                 }
+                remember_reference_seed();
             } else if (lower_bound > 0.0) {
                 // A different axis can disambiguate a coordinate crossed twice.
                 // Accept only a chain reaching the endpoint lower bound, leaving
                 // the original seed and refinement path unchanged otherwise.
                 for (size_t d = 0; d < degrees_of_freedom; ++d) {
-                    if (d != crossing_dof && visits_reference(d)
-                        && evaluator.calculate_waypoints(input, candidate, v_seed, a_seed) == Result::Working
-                        && (!found || candidate.duration <= best.duration)
-                        && candidate.duration <= lower_bound + 1e-9 * std::max(1.0, lower_bound)) {
-                        trajectory = std::move(candidate);
-                        return Result::Working;
+                    if (d != crossing_dof && visits_reference(d)) {
+                        if (evaluator.calculate_waypoints(input, candidate, v_seed, a_seed) == Result::Working
+                            && (!found || candidate.duration <= best.duration)
+                            && candidate.duration <= lower_bound + 1e-9 * std::max(1.0, lower_bound)) {
+                            trajectory = std::move(candidate);
+                            return Result::Working;
+                        }
+                        remember_reference_seed();
                     }
                 }
                 // The original first-crossing attempts did not recover the reference.
                 for (size_t d = 0; d < degrees_of_freedom; ++d) {
-                    if (visits_reference.template operator()<true>(d)
-                        && evaluator.calculate_waypoints(input, candidate, v_seed, a_seed) == Result::Working
-                        && (!found || candidate.duration <= best.duration)
-                        && candidate.duration <= lower_bound + 1e-9 * std::max(1.0, lower_bound)) {
-                        trajectory = std::move(candidate);
-                        return Result::Working;
+                    if (visits_reference.template operator()<true>(d)) {
+                        if (evaluator.calculate_waypoints(input, candidate, v_seed, a_seed) == Result::Working
+                            && (!found || candidate.duration <= best.duration)
+                            && candidate.duration <= lower_bound + 1e-9 * std::max(1.0, lower_bound)) {
+                            trajectory = std::move(candidate);
+                            return Result::Working;
+                        }
+                        remember_reference_seed();
                     }
                 }
             }
+        }
+        // Preserve all original reference attempts before trying bounded numerical
+        // perturbations. Coincident and inherited endpoint states are handled only
+        // through the already validated compact-chain expansion above.
+        if (!reference_velocities.empty()) {
+            // Move only free states off degenerate section boundaries, by at
+            // most a few hundred machine epsilons relative to each component.
+            for (size_t trial = 0; trial < 3; ++trial) {
+                const double scale = trial == 0 ? 1.0 - 1e-14
+                    : (trial == 1 ? std::nextafter(1.0, 0.0) : 1.0 - 1e-13);
+                for (size_t i = 0; i < count; ++i) {
+                    for (size_t d = 0; d < degrees_of_freedom; ++d) {
+                        v_seed[i][d] = reference_velocities[i][d] * scale;
+                        a_seed[i][d] = trial == 1 ? reference_accelerations[i][d] : reference_accelerations[i][d] * scale;
+                    }
+                }
+                if (evaluator.calculate_waypoints(input, candidate, v_seed, a_seed) == Result::Working
+                    && (!found || candidate.duration < best.duration)
+                    && candidate.duration <= lower_bound + 1e-9 * std::max(1.0, lower_bound)) {
+                    trajectory = std::move(candidate);
+                    return Result::Working;
+                }
+            }
+            // v_seed/a_seed are workspaces: the endpoint-motion seed below
+            // overwrites every component before either one is read again.
         }
         States velocity_scale(count, zero), acceleration_scale(count, zero);
         States v_lower(count, zero), v_upper(count, zero), a_lower(count, zero), a_upper(count, zero);
@@ -842,12 +907,27 @@ public:
         if (!found) {
             return baseline_status;
         }
+        if (input.per_section_minimum_duration) {
+            // The original interval minima form a lower bound on total duration.
+            double minimum_duration_sum = 0.0;
+            for (double minimum: *input.per_section_minimum_duration) {
+                minimum_duration_sum += minimum;
+            }
+            if (best.duration == minimum_duration_sum) {
+                trajectory = std::move(best);
+                return Result::Working;
+            }
+        }
         const auto refine = [&](const Trajectory<DOFs, CustomVector>& seed, const States& seed_v, const States& seed_a) {
             velocities = seed_v;
             accelerations = seed_a;
             auto section_input = input;
             section_input.intermediate_positions.clear();
+            section_input.per_section_minimum_duration.reset();
             const auto solve_section = [&](size_t i, Trajectory<DOFs, CustomVector>& section) {
+                if (input.per_section_minimum_duration) {
+                    section_input.minimum_duration = (*input.per_section_minimum_duration)[i];
+                }
                 for (size_t d = 0; d < degrees_of_freedom; ++d) {
                     section_input.current_position[d] = i == 0 ? input.current_position[d] : input.intermediate_positions[i - 1][d];
                     section_input.current_velocity[d] = i == 0 ? input.current_velocity[d] : velocities[i - 1][d];
@@ -872,6 +952,7 @@ public:
             auto left_trial = make_trajectory(), right_trial = make_trajectory();
             auto state_input = input;
             state_input.intermediate_positions.clear();
+            state_input.per_section_minimum_duration.reset();
             auto old_v = zero, old_a = zero;
             const auto try_state = [&](size_t i, const Vector<double>& v, const Vector<double>& a) {
                 if (v == velocities[i] && a == accelerations[i]) {
@@ -958,9 +1039,15 @@ public:
             for (size_t d = 0; d < degrees_of_freedom; ++d) {
                 result.independent_min_durations[d] = 0.0;
             }
+            size_t section_index = 0;
             for (const auto& section: sections) {
                 result.local_profiles.push_back(section.profiles[0]);
+                const double previous_duration = result.duration;
                 result.duration += section.duration;
+                if (input.per_section_minimum_duration && (*input.per_section_minimum_duration)[section_index] > 0.0 && result.duration <= previous_duration) {
+                    return seed;
+                }
+                ++section_index;
                 result.local_cumulative_times.push_back(result.duration);
                 for (size_t d = 0; d < degrees_of_freedom; ++d) {
                     result.independent_min_durations[d] += section.independent_min_durations[d];
