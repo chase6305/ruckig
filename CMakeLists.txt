@@ -85,7 +85,7 @@ if(BUILD_TESTS)
     list(FILTER ruckig_cloud_test_core_sources EXCLUDE REGEX "(^|/)cloud_client\\.cpp$")
     add_executable(test-cloud-client test/test_cloud_client.cpp
       ${ruckig_cloud_test_core_sources} src/ruckig/cloud_client.cpp)
-    target_sources(test-cloud-client PRIVATE test/test_cloud_metadata.cpp)
+    target_sources(test-cloud-client PRIVATE test/test_cloud_metadata.cpp test/test_cloud_schema.cpp)
     target_compile_features(test-cloud-client PRIVATE cxx_std_20)
     target_compile_definitions(test-cloud-client PRIVATE WITH_CLOUD_CLIENT)
     target_include_directories(test-cloud-client PRIVATE
