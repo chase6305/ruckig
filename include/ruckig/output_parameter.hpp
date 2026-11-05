@@ -15,11 +15,21 @@ template<size_t DOFs = 0, template<class, size_t> class CustomVector = StandardV
 class OutputParameter {
     template<class T> using Vector = CustomVector<T, DOFs>;
 
+    void initialize() {
+        for (size_t dof = 0; dof < degrees_of_freedom; ++dof) {
+            new_position[dof] = 0.0;
+            new_velocity[dof] = 0.0;
+            new_acceleration[dof] = 0.0;
+            new_jerk[dof] = 0.0;
+        }
+    }
+
     void resize(size_t dofs) {
         new_position.resize(dofs);
         new_velocity.resize(dofs);
         new_acceleration.resize(dofs);
         new_jerk.resize(dofs);
+        initialize();
     }
 
 public:
@@ -47,10 +57,10 @@ public:
     bool was_calculation_interrupted {false};
 
     //! Computational duration of the last update call
-    double calculation_duration; // [µs]
+    double calculation_duration {0.0}; // [µs]
 
     template<size_t D = DOFs, typename std::enable_if<(D >= 1), int>::type = 0>
-    OutputParameter(): degrees_of_freedom(DOFs) { }
+    OutputParameter(): degrees_of_freedom(DOFs) { initialize(); }
 
     template<size_t D = DOFs, typename std::enable_if<(D == 0), int>::type = 0>
     OutputParameter(size_t dofs):
@@ -65,7 +75,7 @@ public:
     OutputParameter(size_t max_number_of_waypoints):
         degrees_of_freedom(DOFs),
         trajectory(Trajectory<DOFs, CustomVector>(max_number_of_waypoints))
-    { }
+    { initialize(); }
 
     template<size_t D = DOFs, typename std::enable_if<(D == 0), int>::type = 0>
     OutputParameter(size_t dofs, size_t max_number_of_waypoints):
