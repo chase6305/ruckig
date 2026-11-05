@@ -907,6 +907,17 @@ public:
         if (!found) {
             return baseline_status;
         }
+        if (input.per_section_minimum_duration) {
+            // The original interval minima form a lower bound on total duration.
+            double minimum_duration_sum = 0.0;
+            for (double minimum: *input.per_section_minimum_duration) {
+                minimum_duration_sum += minimum;
+            }
+            if (best.duration == minimum_duration_sum) {
+                trajectory = std::move(best);
+                return Result::Working;
+            }
+        }
         const auto refine = [&](const Trajectory<DOFs, CustomVector>& seed, const States& seed_v, const States& seed_a) {
             velocities = seed_v;
             accelerations = seed_a;

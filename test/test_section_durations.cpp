@@ -257,6 +257,24 @@ TEST_CASE("automatic state selection preserves every original interval minimum")
     automatic_duration_cases<0>();
 }
 
+TEST_CASE("dominant interval minima attain their total with time or phase synchronization") {
+    auto input = duration_input<2>();
+    duration_points(input, {1.0, 2.0});
+    input.per_section_minimum_duration = std::vector<double>{3.3, 3.2, 3.1};
+    const double minimum_total = std::accumulate(input.per_section_minimum_duration->begin(),
+        input.per_section_minimum_duration->end(), 0.0);
+    auto otg = duration_otg<2>();
+    for (auto synchronization: {Synchronization::Time, Synchronization::Phase}) {
+        input.synchronization = synchronization;
+        for (size_t iterations: {size_t(0), size_t(8)}) {
+            auto trajectory = duration_trajectory<2>();
+            REQUIRE(otg.optimize_waypoints(input, trajectory, iterations) == Result::Working);
+            CHECK(trajectory.get_duration() == minimum_total);
+            check_duration_oracles(input, trajectory);
+        }
+    }
+}
+
 TEST_CASE("per-section minima validate values and invalidate failed trajectories") {
     invalid_duration_cases<2, false>();
     invalid_duration_cases<2, true>();
