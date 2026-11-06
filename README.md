@@ -281,6 +281,8 @@ cargo run --locked --release --example 17_local_waypoints
 
 The Cargo build currently includes the cloud client unconditionally and has no cloud-disable feature. The explicit local methods and offline replay above still make no cloud calls.
 
+For explicit local chains, `pass_to_input` also removes every waypoint reached by the output time, including when one cycle crosses several sections. Repeating the call with the same output keeps the remaining list unchanged. Apply it before editing the next target or waypoint list. Before replanning, trim any caller-owned waypoint velocity/acceleration arrays to match the remaining points. Ordinary cloud outputs retain their existing waypoint-removal behavior.
+
 ### Input Parameter
 
 To go into more detail, the *InputParameter* type has following members:
@@ -361,6 +363,10 @@ ErrorPositionalLimits           | -102
 ErrorExecutionTimeCalculation   | -110
 ErrorSynchronizationCalculation | -111
 
+With the default C++ `Ruckig` configuration, cloud connection failures, non-200 HTTP responses, and JSON parsing failures return `Result::Error`. `RuckigThrow` and Python continue to report these failures with exceptions.
+
+Malformed cloud trajectory data follows the same error/exception policy and leaves no usable trajectory. Responses must have consistent section dimensions and profile array lengths. Section and phase end times must be finite, nonnegative, and ordered; the final section end must equal the reported duration. Filtered or merged responses may contain fewer sections than the requested waypoint chain. These checks validate the response structure for sampling; they do not repeat the server's kinematic optimization.
+
 
 ### Output Parameter
 
@@ -390,6 +396,8 @@ std::array<double, DOFs> independent_min_durations; // Time-optimal profile for 
 <...> at_time(double time); // Get the kinematic state of the trajectory at a given time
 void get_position_extrema(Vector<Bound>& position_extrema); // Passes information about the position extrema and their times
 ```
+Independent minimum durations are available for state-to-state and explicit local waypoint calculations. The cloud path does not populate this diagnostic; its C++/Python getter raises `RuckigError` for a cloud trajectory. Use local calculation when these values are required.
+
 Again, we refer to the [API documentation](https://docs.ruckig.com) for the exact signatures.
 
 

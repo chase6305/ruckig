@@ -226,6 +226,7 @@ public:
     Result calculate(const InputParameter<DOFs, CustomVector>& inp, Trajectory<DOFs, CustomVector>& traj, double delta_time, bool& was_interrupted) {
         was_interrupted = false;
 #if defined WITH_CLOUD_CLIENT
+        traj.independent_min_durations_available = true;
         traj.resize(0);
 #endif
 

@@ -30,6 +30,7 @@ class Trajectory {
     friend class TargetCalculator<DOFs, CustomVector>;
     friend class WaypointsCalculator<DOFs, CustomVector>;
     template<size_t, template<class, size_t> class, bool> friend class Ruckig;
+    template<size_t, template<class, size_t> class> friend class OutputParameter;
 
     Container<Vector<Profile>> profiles;
     // Allocated only for explicit local multi-waypoint calculations.
@@ -39,6 +40,10 @@ class Trajectory {
     double duration {0.0};
     bool calculated {false};
     bool profiles_calculated {false};
+#if defined WITH_CLOUD_CLIENT
+    // The cloud path does not populate independent minimum durations.
+    bool independent_min_durations_available {true};
+#endif
     Container<double> cumulative_times;
 
     Vector<double> independent_min_durations;
@@ -358,10 +363,16 @@ public:
     }
 
     //! Get the minimum duration of each independent DoF
+    //! Cloud trajectories do not provide this diagnostic and raise RuckigError.
     Vector<double> get_independent_min_durations() const {
         if ((!calculated && !profiles_calculated) || !has_valid_profile_structure()) {
             throw RuckigError("independent durations require a calculated trajectory.");
         }
+#if defined WITH_CLOUD_CLIENT
+        if (!independent_min_durations_available) {
+            throw RuckigError("independent durations are unavailable for cloud trajectories.");
+        }
+#endif
         return independent_min_durations;
     }
 

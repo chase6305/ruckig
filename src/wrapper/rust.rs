@@ -433,6 +433,29 @@ mod tests {
     }
 
     #[test]
+    fn pass_to_input_removes_every_crossed_waypoint() {
+        let mut otg = Ruckig::new_direct(1, 5.0);
+        let mut input = input();
+        input.target_position = vec![4.0];
+        input.intermediate_positions = vec![vec![1.0], vec![2.0], vec![3.0]];
+        input.max_velocity = vec![2.0];
+        input.max_acceleration = vec![2.0];
+        input.max_jerk = vec![4.0];
+        let mut trajectory = Trajectory::new_direct(1);
+        assert_eq!(otg.calculate_waypoints(&mut input, &mut trajectory), Result::Working);
+        let mut output = OutputParameter::new_direct(1);
+        assert_eq!(otg.update_trajectory(&trajectory, &mut output), Result::Working);
+        assert_eq!(output.new_section, 2);
+        output.pass_to_input(&mut input);
+        assert_eq!(input.intermediate_positions, vec![vec![3.0]]);
+        output.pass_to_input(&mut input);
+        assert_eq!(input.intermediate_positions, vec![vec![3.0]]);
+        assert_eq!(otg.update_current_trajectory(&mut output), Result::Finished);
+        output.pass_to_input(&mut input);
+        assert!(input.intermediate_positions.is_empty());
+    }
+
+    #[test]
     fn pass_to_input_preserves_more_than_256_remaining_waypoints() {
         let mut otg = Ruckig::new_direct(2, 0.01);
         let mut input = InputParameter::new(2);
