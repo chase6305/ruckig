@@ -681,7 +681,8 @@ public:
                     reference_accelerations = a_seed;
                 }
             };
-            if (visits_reference(crossing_dof)) {
+            const bool reference_matches = visits_reference(crossing_dof);
+            if (reference_matches) {
                 // Re-solve every segment and enforce the original position bounds.
                 try_seed(v_seed, a_seed);
                 if (found && (best.duration == 0.0 || (lower_bound > 0.0 && best.duration <= lower_bound + 1e-9 * std::max(1.0, lower_bound)))) {
@@ -689,8 +690,10 @@ public:
                     return Result::Working;
                 }
                 remember_reference_seed();
-            } else if (lower_bound > 0.0) {
-                // A different axis can disambiguate a coordinate crossed twice.
+            }
+            if (lower_bound > 0.0 && (!reference_matches || !found)) {
+                // A different axis can disambiguate a coordinate crossed twice
+                // or recover a feasible chain after the matching states failed.
                 // Accept only a chain reaching the endpoint lower bound, leaving
                 // the original seed and refinement path unchanged otherwise.
                 for (size_t d = 0; d < degrees_of_freedom; ++d) {
