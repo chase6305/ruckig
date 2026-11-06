@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <array>
 #include <chrono>
+#include <cstring>
 #include <iostream>
 #include <limits>
 #include <math.h>
@@ -604,7 +605,7 @@ public:
                 lower_bound = reference.duration;
             }
             // Keep the ordinary matcher separate from the rare phase-root scan.
-            const auto visits_reference = [&]<bool all_crossings = false>(size_t dof) {
+            const auto visits_reference = [&]<bool all_crossings = false>(size_t dof, std::vector<double>* matched_times = nullptr) {
                 double time = 0.0;
                 for (size_t i = 0; i < count; ++i) {
                     const auto matches = [&](double candidate_time) {
@@ -616,6 +617,9 @@ public:
                             if (std::abs(p_sample[d] - input.intermediate_positions[i][d]) > 1e-8) {
                                 return false;
                             }
+                        }
+                        if (matched_times) {
+                            (*matched_times)[i] = candidate_time;
                         }
                         time = candidate_time;
                         return true;
@@ -692,13 +696,36 @@ public:
                 remember_reference_seed();
             }
             if (lower_bound > 0.0 && (!reference_matches || !found)) {
+                // Record retry keys only on the new no-feasible-plan rescue path.
+                const bool cache_failed_seeds = reference_matches && !found;
+                std::vector<double> candidate_times;
+                std::vector<std::vector<double>> failed_times;
+                if (cache_failed_seeds) {
+                    candidate_times.resize(count);
+                }
+                auto* matched_times = cache_failed_seeds ? &candidate_times : nullptr;
+                const auto reconstruct_reference = [&]() {
+                    if (cache_failed_seeds) {
+                        // Exact times on this immutable reference reproduce identical states.
+                        for (const auto& failed: failed_times) {
+                            if (std::memcmp(failed.data(), candidate_times.data(), count * sizeof(double)) == 0) {
+                                return false;
+                            }
+                        }
+                    }
+                    const bool working = evaluator.calculate_waypoints(input, candidate, v_seed, a_seed) == Result::Working;
+                    if (cache_failed_seeds && !working) {
+                        failed_times.push_back(candidate_times);
+                    }
+                    return working;
+                };
                 // A different axis can disambiguate a coordinate crossed twice
                 // or recover a feasible chain after the matching states failed.
                 // Accept only a chain reaching the endpoint lower bound, leaving
                 // the original seed and refinement path unchanged otherwise.
                 for (size_t d = 0; d < degrees_of_freedom; ++d) {
-                    if (d != crossing_dof && visits_reference(d)) {
-                        if (evaluator.calculate_waypoints(input, candidate, v_seed, a_seed) == Result::Working
+                    if (d != crossing_dof && visits_reference(d, matched_times)) {
+                        if (reconstruct_reference()
                             && (!found || candidate.duration <= best.duration)
                             && candidate.duration <= lower_bound + 1e-9 * std::max(1.0, lower_bound)) {
                             trajectory = std::move(candidate);
@@ -709,8 +736,8 @@ public:
                 }
                 // The original first-crossing attempts did not recover the reference.
                 for (size_t d = 0; d < degrees_of_freedom; ++d) {
-                    if (visits_reference.template operator()<true>(d)) {
-                        if (evaluator.calculate_waypoints(input, candidate, v_seed, a_seed) == Result::Working
+                    if (visits_reference.template operator()<true>(d, matched_times)) {
+                        if (reconstruct_reference()
                             && (!found || candidate.duration <= best.duration)
                             && candidate.duration <= lower_bound + 1e-9 * std::max(1.0, lower_bound)) {
                             trajectory = std::move(candidate);

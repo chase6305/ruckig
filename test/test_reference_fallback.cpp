@@ -200,3 +200,47 @@ TEST_CASE("zero reference states preserve baseline failures and validation polic
     zero_state_error_policy<0, false>();
     zero_state_error_policy<0, true>();
 }
+
+TEST_CASE("reference reconstruction keeps distinct crossing times after an earlier failure") {
+    for (size_t variant = 0; variant < 3; ++variant) {
+        std::vector<double> velocity {-0.525, -0.2625, 0.275};
+        std::vector<double> acceleration {0.5, 0.25, -0.25};
+        if (variant == 1) {
+            velocity.insert(velocity.begin() + 2, -0.13125);
+            acceleration.insert(acceleration.begin() + 2, 0.125);
+        } else if (variant == 2) {
+            velocity.push_back(0.0);
+            acceleration.push_back(0.0);
+        }
+        const size_t dofs = velocity.size();
+        InputParameter<> input(dofs);
+        input.current_position = std::vector<double>(dofs, 0.0);
+        input.current_velocity = velocity;
+        input.current_acceleration = input.target_acceleration = acceleration;
+        input.max_velocity = input.max_acceleration = std::vector<double>(dofs, 1.0);
+        input.max_jerk = std::vector<double>(dofs, 0.0);
+        for (size_t d = 0; d < dofs; ++d) {
+            input.target_position[d] = 2.0 * velocity[d] + 2.0 * acceleration[d];
+            input.target_velocity[d] = velocity[d] + 2.0 * acceleration[d];
+        }
+        // Proportional coordinates do not make every crossing time equivalent.
+        for (double time: {0.5, 1.0}) {
+            auto point = input.current_position;
+            for (size_t d = 0; d < dofs; ++d) point[d] = velocity[d] * time + acceleration[d] * time * time / 2.0;
+            input.intermediate_positions.push_back(point);
+        }
+        Ruckig<> solver(dofs);
+        Trajectory<> trajectory(dofs);
+        REQUIRE(solver.optimize_waypoints(input, trajectory) == Result::Working);
+        CHECK(std::abs(trajectory.get_duration() - 2.0) < 1e-12);
+        for (double time: {0.0, 0.5, 1.0, 1.05, 1.1, 2.0}) {
+            std::vector<double> p(dofs), v(dofs), a(dofs);
+            trajectory.at_time(time, p, v, a);
+            for (size_t d = 0; d < dofs; ++d) {
+                CHECK(std::abs(p[d] - velocity[d] * time - acceleration[d] * time * time / 2.0) < 1e-12);
+                CHECK(std::abs(v[d] - velocity[d] - acceleration[d] * time) < 1e-12);
+                CHECK(a[d] == acceleration[d]);
+            }
+        }
+    }
+}
