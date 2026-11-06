@@ -446,6 +446,8 @@ This is a feasibility check of the generated motion: it does not search for a di
 
 ### Tracking Interface
 
+**Ruckig Pro only.** The `Trackig` examples below are upstream Pro documentation; this fork does not implement the tracking interface.
+
 When following an arbitrary signal with position, velocity, acceleration, and jerk-limitation, the straightforward way would be to pass the current state to Ruckig's target state. However, as the resulting trajectory will take time to catch up, this approach will always lag behind the signal. The tracking interface solves this problem by predicting ahead (e.g. with constant acceleration by default) and is therefore able to follow signals very closely in a time-optimal way. This might be very helpful for (general) tracking, robot servoing, or trajectory post-processing applications.
 
 To use the tracking interface, construct
@@ -475,14 +477,14 @@ Please find a complete example [here](https://github.com/pantor/ruckig/blob/main
 ```.cpp
 smooth_trajectory = trackig.calculate_trajectory(target_states, input);
 ```
-method with the trajectory given as a `std::vector` of target states. The Tracking interface is available in the Ruckig Pro version.
+method with the trajectory given as a `std::vector` of target states.
 
 
 ## Tests and Numerical Stability
 
-The current test suite validates over 5.000.000.000 random trajectories as well as many additional edge cases. The numerical exactness is tested for the final position and final velocity to be within `1e-8`, for the final acceleration to be within `1e-10`, and for the velocity, acceleration and jerk limit to be within a numerical error of `1e-12`. These are absolute values - we suggest to scale your input so that these correspond to your required precision of the system. For example, for most real-world systems we suggest to use input values in `[m]` (instead of e.g. `[mm]`), as `1e-8m` is sufficiently precise for practical trajectory generation. Furthermore, all kinematic limits should be below `1e9`. The maximal supported trajectory duration is `7e3`. Note that Ruckig will also output values outside of this range, there is however no guarantee for correctness.
+Linux CI runs `./build/test-target 5000000` for randomized state-to-state testing alongside the repository's regression suites. The numerical exactness is tested for the final position and final velocity to be within `1e-8`, for the final acceleration to be within `1e-10`, and for the velocity, acceleration and jerk limit to be within a numerical error of `1e-12`. These are absolute values - we suggest to scale your input so that these correspond to your required precision of the system. For example, for most real-world systems we suggest to use input values in `[m]` (instead of e.g. `[mm]`), as `1e-8m` is sufficiently precise for practical trajectory generation. Furthermore, all kinematic limits should be below `1e9`. The maximal supported trajectory duration is `7e3`. Note that Ruckig will also output values outside of this range, there is however no guarantee for correctness.
 
-The Ruckig Pro version has additional tools to increase the numerical range and improve reliability. For example, the `position_scale` and `time_scale` parameter of the `Calculator` class change the internal representation of the input parameters.
+The following `Calculator::position_scale` and `Calculator::time_scale` example is retained as a Pro-only reference; these fields are not implemented in this fork.
 ```.cpp
 Ruckig ruckig {1};  // Works also for Trackig
 
@@ -494,7 +496,7 @@ This way, you can easily achieve the requirements above even for very high jerk 
 
 ## Benchmark
 
-We report [benchmarking results in our docs](https://docs.ruckig.com/benchmark.html). To the best of our knowledge, the Ruckig Community version is the fastest trajectory or s-curve generator for state-to-state motions and is well-suited for control cycles down to 500 microseconds (2000 Hz). The Pro version is around twice as fast, making it even better suited for short control cycles or less powerful hardware.
+Upstream [state-to-state benchmark results](https://docs.ruckig.com/benchmark.html) describe a different workload from this fork's local waypoint search. For local planning, filtering, position queries and failed-reference recovery, use the [repository benchmark instructions](#fully-local-multi-waypoint-calculation) above and record the build settings and revision when comparing results.
 
 
 ## Development
