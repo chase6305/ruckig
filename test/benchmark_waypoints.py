@@ -7,6 +7,40 @@ import time
 from ruckig import InputParameter, Result, Ruckig, Trajectory
 
 
+def benchmark_failed_reference_recovery():
+    points = 32
+    print(f'\n{"DoFs":>6} {"Input points":>12} {"Expected failure":>22} {"Median (us)":>14}')
+    for dofs in (2, 12, 32):
+        inp = InputParameter(dofs)
+        velocities = [-0.525 if d % 2 == 0 else 0.25 for d in range(dofs)]
+        accelerations = [0.5 if d % 2 == 0 else -0.25 for d in range(dofs)]
+        inp.current_position = [0.0] * dofs
+        inp.current_velocity = velocities
+        inp.current_acceleration = inp.target_acceleration = accelerations
+        inp.target_position = [2.0 * v + 2.0 * a for v, a in zip(velocities, accelerations)]
+        inp.target_velocity = [v + 2.0 * a for v, a in zip(velocities, accelerations)]
+        inp.max_velocity = inp.max_acceleration = [1.0] * dofs
+        inp.max_jerk = [0.0] * dofs
+        inp.min_position = [-1.0] * dofs
+        inp.max_position = [0.12 if d == 1 else 1.0 for d in range(dofs)]
+        times = [0.5 * (k + 1) / points for k in range(points)]
+        inp.intermediate_positions = [[v * t + a * t * t / 2.0 for v, a in zip(velocities, accelerations)] for t in times]
+        # J=0 fixes acceleration; axis 1 must peak at 0.125, outside its 0.12 limit.
+        otg, trajectory = Ruckig(dofs), Trajectory(dofs)
+        if not inp.validate():
+            raise RuntimeError(f'{dofs} DoFs: failed-recovery input is invalid')
+        measurements = []
+        for repetition in range(12):
+            start = time.perf_counter_ns()
+            result = otg.optimize_waypoints(inp, trajectory)
+            elapsed_us = (time.perf_counter_ns() - start) / 1000
+            if result != Result.ErrorZeroLimits:
+                raise RuntimeError(f'{dofs} DoFs: unexpected failed-recovery result: {result}')
+            if repetition > 0:  # Exclude the warm-up call.
+                measurements.append(elapsed_us)
+        print(f'{dofs:>6} {points:>12} {result!s:>22} {statistics.median(measurements):>14.1f}')
+
+
 def benchmark_position_queries():
     batch_size = 128
     print(f'\n{"Sections":>10} {"Query":>18} {"Median/query (us)":>19}')
@@ -128,6 +162,7 @@ def main():
         print(f'{dofs:>6} {count:>12} {statistics.median(measurements):>23.1f}')
 
     benchmark_position_queries()
+    benchmark_failed_reference_recovery()
 
 
 if __name__ == '__main__':

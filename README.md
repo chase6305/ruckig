@@ -284,6 +284,8 @@ The `endpoint-2d` case includes repeated boundary positions with nonzero endpoin
 
 A third table measures early queries and the same near-end positions with `time_after=0` and `time_after=T-0.25` on local constant-speed chains of 100, 1,000 and 10,000 sections. It reports median time per query from 11 batches of 128 calls after one warm-up batch, including Python call overhead; construction and correctness checks stay outside timing.
 
+A final table measures failed reference recovery with 32 waypoints and 2, 12 or 32 axes. These zero-jerk inputs pass validation, but their constant-acceleration motion violates a position bound; the expected return is `ErrorZeroLimits`.
+
 ```bash
 cargo test --locked
 cargo run --locked --release --example 17_local_waypoints
