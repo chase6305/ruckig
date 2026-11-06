@@ -1,7 +1,7 @@
 import math
 import unittest
 
-from ruckig import InputParameter, OutputParameter, Result, Ruckig, RuckigError, Trajectory
+from ruckig import InputParameter, OutputParameter, Profile, Result, Ruckig, RuckigError, Trajectory
 
 
 class WrapperRegressionTest(unittest.TestCase):
@@ -45,6 +45,16 @@ class WrapperRegressionTest(unittest.TestCase):
         for i, time in enumerate(times):
             self.assertEqual((positions[i], velocities[i], accelerations[i]), trajectory.at_time(time))
         self.assertEqual(trajectory.at_times([]), ([], [], []))
+
+    def test_profile_metadata_enums(self):
+        otg, trajectory = Ruckig(1), Trajectory(1)
+        for target, direction in ((1.0, Profile.Direction.UP), (-1.0, Profile.Direction.DOWN)):
+            self.input.target_position = [target]
+            self.assertEqual(otg.calculate(self.input, trajectory), Result.Working)
+            profile = trajectory.profiles[0][0]
+            self.assertEqual(profile.direction, direction)
+            self.assertIsInstance(profile.limits, Profile.ReachedLimits)
+            self.assertIsInstance(profile.control_signs, Profile.ControlSigns)
 
     def test_position_bounds(self):
         trajectory = Trajectory(1)
@@ -211,6 +221,50 @@ class WrapperRegressionTest(unittest.TestCase):
         self.assertAlmostEqual(p[0], 1.0)
         self.assertGreater(v[0], 1.0)
         self.assertGreater(a[0], 0.1)
+
+    def test_local_per_section_timing_scalar_oracle(self):
+        self.input.target_position = [0.0]
+        self.input.intermediate_positions = [[0.0], [0.0]]
+        minima = [0.01, 0.02, 0.0]
+        self.input.per_section_minimum_duration = minima
+        trajectory = Trajectory(1)
+        self.assertEqual(Ruckig(1).calculate_waypoints(self.input, trajectory), Result.Working)
+        prefix = 0.0
+        for index, minimum in enumerate(minima):
+            scalar = InputParameter(1)
+            scalar.target_position = [0.0]
+            scalar.max_velocity = scalar.max_acceleration = scalar.max_jerk = [1.0]
+            scalar.minimum_duration = minimum
+            oracle = Trajectory(1)
+            self.assertEqual(Ruckig(1).calculate(scalar, oracle), Result.Working)
+            self.assertGreaterEqual(oracle.duration, minimum)
+            prefix += oracle.duration
+            self.assertEqual(trajectory.intermediate_durations[index], prefix)
+        times = trajectory.intermediate_durations
+        self.assertEqual(times[1] - times[0], math.nextafter(0.02, 0.0))
+
+    def test_automatic_per_section_timing_and_validation(self):
+        self.input.target_position = [3.0]
+        self.input.intermediate_positions = [[1.0], [1.0], [2.0]]
+        self.input.per_section_minimum_duration = [0.0, 3.0, 0.0, 0.5]
+        trajectory = Trajectory(1)
+        otg = Ruckig(1)
+        self.assertEqual(otg.optimize_waypoints(self.input, trajectory), Result.Working)
+        times = trajectory.intermediate_durations
+        self.assertEqual(len(times), 4)
+        self.assertGreater(times[1], times[0])
+        for point, time in zip(self.input.intermediate_positions, times):
+            self.assertAlmostEqual(trajectory.at_time(time)[0][0], point[0])
+        self.input.per_section_minimum_duration = [0.0, float('nan'), 0.0, 0.0]
+        with self.assertRaises(RuckigError):
+            otg.optimize_waypoints(self.input, trajectory)
+        with self.assertRaises(RuckigError):
+            trajectory.at_time(0.0)
+        self.input.intermediate_positions = []
+        self.input.per_section_minimum_duration = [4.0]
+        self.input.minimum_duration = 5.0
+        self.assertEqual(otg.calculate_waypoints(self.input, trajectory), Result.Working)
+        self.assertEqual(trajectory.duration, 5.0)
 
     def test_sampling_rejects_invalid_state_and_time(self):
         trajectory = Trajectory(1)
