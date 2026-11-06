@@ -511,6 +511,8 @@ bool PositionThirdOrderStep1::time_all_single_step(Profile* profile, double vMax
 
 
 bool PositionThirdOrderStep1::get_profile(const Profile& input, Block& block) {
+    valid_profiles_overflow = false;
+
     // Zero-limits special case
     if (_jMax == 0.0 || _aMax == 0.0 || _aMin == 0.0) {
         auto& p = block.p_min;
@@ -584,6 +586,10 @@ bool PositionThirdOrderStep1::get_profile(const Profile& input, Block& block) {
     }
 
 return_block:
+    if (valid_profiles_overflow) {
+        return false;
+    }
+
     // A newly recovered long root must not suppress the single-jerk fallback.
     // Recover a missing short solution only when the intervening gap is provable.
     const bool one_duration = profile == start + 1 || (profile == start + 2

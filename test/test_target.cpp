@@ -1696,3 +1696,64 @@ TEST_CASE("two-jerk-short-profile-duplicates-retain-blocked-gap") {
     CHECK(std::abs(v - input.target_velocity[0]) < 1e-8);
     CHECK(std::abs(a - input.target_acceleration[0]) < 1e-10);
 }
+
+namespace ruckig {
+struct ProfileCapacityTestAccess {
+    template<class Step>
+    static void check_capacity_and_reset(Step& step, const Profile& input, double duration) {
+        const auto start = step.valid_profiles.begin();
+        const size_t capacity = step.valid_profiles.size() - 1;
+        auto profile = start;
+
+        // Submit initialized candidates directly; no numerical failure input.
+        for (size_t accepted = 1; accepted <= capacity; ++accepted) {
+            *profile = input;
+            profile->t[0] = static_cast<double>(accepted);
+            step.add_profile(profile);
+            REQUIRE(profile == start + accepted);
+            CHECK_FALSE(step.valid_profiles_overflow);
+            CHECK(profile->p[0] == input.p[0]);
+            CHECK(profile->pf == input.pf);
+        }
+
+        const auto probing = profile;
+        for (size_t attempt = 0; attempt < 4; ++attempt) {
+            *profile = input;
+            step.add_profile(profile);
+            REQUIRE(profile == probing);
+            CHECK(step.valid_profiles_overflow);
+            for (size_t saved = 0; saved < capacity; ++saved) {
+                CHECK(start[saved].t[0] == static_cast<double>(saved + 1));
+                CHECK(start[saved].p[0] == input.p[0]);
+                CHECK(start[saved].pf == input.pf);
+            }
+        }
+
+        Block block;
+        REQUIRE(step.get_profile(input, block));
+        CHECK_FALSE(step.valid_profiles_overflow);
+        CHECK(block.t_min == doctest::Approx(duration));
+        CHECK(block.p_min.p[0] == input.p[0]);
+        CHECK(block.p_min.p.back() == doctest::Approx(input.pf));
+    }
+};
+} // namespace ruckig
+
+TEST_CASE("step1-candidate-capacity") {
+    Profile input {};
+    input.set_boundary(2.0, 0.0, 0.0, 3.0, 0.0, 0.0);
+    SUBCASE("third-order-position") {
+        PositionThirdOrderStep1 step {2.0, 0.0, 0.0, 3.0, 0.0, 0.0,
+            1.0, -1.0, 1.0, -1.0, 1.0};
+        ProfileCapacityTestAccess::check_capacity_and_reset(step, input, 4 * std::cbrt(0.5));
+    }
+    SUBCASE("second-order-position") {
+        PositionSecondOrderStep1 step {2.0, 0.0, 3.0, 0.0, 1.0, -1.0, 1.0, -1.0};
+        ProfileCapacityTestAccess::check_capacity_and_reset(step, input, 2.0);
+    }
+    SUBCASE("third-order-velocity") {
+        input.vf = 1.0;
+        VelocityThirdOrderStep1 step {0.0, 0.0, 1.0, 0.0, 1.0, -1.0, 1.0};
+        ProfileCapacityTestAccess::check_capacity_and_reset(step, input, 2.0);
+    }
+}

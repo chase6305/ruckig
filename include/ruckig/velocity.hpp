@@ -8,6 +8,8 @@ namespace ruckig {
 
 //! Mathematical equations for Step 1 in third-order velocity interface: Extremal profiles
 class VelocityThirdOrderStep1 {
+    friend struct ProfileCapacityTestAccess;
+
     using ReachedLimits = Profile::ReachedLimits;
     using ControlSigns = Profile::ControlSigns;
 
@@ -19,6 +21,7 @@ class VelocityThirdOrderStep1 {
 
     // Max 3 valid profiles + 1 for probing
     std::array<Profile, 4> valid_profiles;
+    mutable bool valid_profiles_overflow {false};
     using ProfileIter = decltype(valid_profiles)::iterator;
 
     void time_acc0(ProfileIter& profile, double aMax, double aMin, double jMax, bool return_after_found) const;
@@ -28,6 +31,11 @@ class VelocityThirdOrderStep1 {
     bool time_all_single_step(Profile* profile, double aMax, double aMin, double jMax) const;
 
     inline void add_profile(ProfileIter& profile) const {
+        if (profile == valid_profiles.end() - 1) {
+            // Keep the probing slot writable until get_profile reports failure.
+            valid_profiles_overflow = true;
+            return;
+        }
         const auto prev_profile = profile;
         ++profile;
         profile->set_boundary(*prev_profile);

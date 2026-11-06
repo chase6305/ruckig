@@ -8,6 +8,8 @@ namespace ruckig {
 
 //! Mathematical equations for Step 1 in third-order position interface: Extremal profiles
 class PositionThirdOrderStep1 {
+    friend struct ProfileCapacityTestAccess;
+
     using ReachedLimits = Profile::ReachedLimits;
     using ControlSigns = Profile::ControlSigns;
 
@@ -24,6 +26,7 @@ class PositionThirdOrderStep1 {
 
     // Max 5 valid profiles + 1 for probing
     std::array<Profile, 6> valid_profiles;
+    mutable bool valid_profiles_overflow {false};
     using ProfileIter = decltype(valid_profiles)::iterator;
 
     void time_all_vel(ProfileIter& profile, double vMax, double vMin, double aMax, double aMin, double jMax, bool return_after_found) const;
@@ -40,6 +43,11 @@ class PositionThirdOrderStep1 {
     bool time_all_single_step(Profile* profile, double vMax, double vMin, double aMax, double aMin, double jMax) const;
 
     inline void add_profile(ProfileIter& profile) const {
+        if (profile == valid_profiles.end() - 1) {
+            // Keep the probing slot writable until get_profile reports failure.
+            valid_profiles_overflow = true;
+            return;
+        }
         const auto prev_profile = profile;
         ++profile;
         profile->set_boundary(*prev_profile);
@@ -91,6 +99,8 @@ public:
 
 //! Mathematical equations for Step 1 in second-order position interface: Extremal profiles
 class PositionSecondOrderStep1 {
+    friend struct ProfileCapacityTestAccess;
+
     using ReachedLimits = Profile::ReachedLimits;
     using ControlSigns = Profile::ControlSigns;
 
@@ -102,6 +112,7 @@ class PositionSecondOrderStep1 {
 
     // Max 3 valid profiles + 1 for probing
     std::array<Profile, 4> valid_profiles;
+    mutable bool valid_profiles_overflow {false};
     using ProfileIter = decltype(valid_profiles)::iterator;
 
     void time_acc0(ProfileIter& profile, double vMax, double vMin, double aMax, double aMin, bool return_after_found) const;
@@ -111,6 +122,11 @@ class PositionSecondOrderStep1 {
     bool time_all_single_step(Profile* profile, double vMax, double vMin, double aMax, double aMin) const;
 
     inline void add_profile(ProfileIter& profile) const {
+        if (profile == valid_profiles.end() - 1) {
+            // Keep the probing slot writable until get_profile reports failure.
+            valid_profiles_overflow = true;
+            return;
+        }
         const auto prev_profile = profile;
         ++profile;
         profile->set_boundary(*prev_profile);
