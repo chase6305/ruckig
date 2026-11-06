@@ -276,6 +276,8 @@ The waypoint benchmark reports stopping and automatic trajectory durations in se
 
 The `endpoint-2d` case includes repeated boundary positions with nonzero endpoint velocities, while `reference-both-2d` exercises repeated crossings on both axes. The `reference-state-2d` case checks recovery of a 2.5-second reference motion when exact sampled intermediate states produce a longer chain. A second table reports filtering time for monotone one-coordinate runs in one- and six-axis inputs, including Python call overhead.
 
+A third table measures early queries and the same near-end positions with `time_after=0` and `time_after=T-0.25` on local constant-speed chains of 100, 1,000 and 10,000 sections. It reports median time per query from 11 batches of 128 calls after one warm-up batch, including Python call overhead; construction and correctness checks stay outside timing.
+
 ```bash
 cargo test --locked
 cargo run --locked --release --example 17_local_waypoints

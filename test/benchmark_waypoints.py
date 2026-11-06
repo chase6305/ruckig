@@ -7,6 +7,50 @@ import time
 from ruckig import InputParameter, Result, Ruckig, Trajectory
 
 
+def benchmark_position_queries():
+    batch_size = 128
+    print(f'\n{"Sections":>10} {"Query":>18} {"Median/query (us)":>19}')
+    for sections in (100, 1000, 10000):
+        inp = InputParameter(1)
+        inp.current_position = [0.0]
+        inp.current_velocity = inp.target_velocity = [1.0]
+        inp.target_position = [sections / 4.0]
+        inp.intermediate_positions = [[k / 4.0] for k in range(1, sections)]
+        inp.max_velocity = [1.0]
+        inp.max_acceleration = [2.0]
+        inp.max_jerk = [4.0]
+        otg, trajectory = Ruckig(1), Trajectory(1)
+        velocities, accelerations = [[1.0]] * (sections - 1), [[0.0]] * (sections - 1)
+        if otg.calculate_waypoints(inp, trajectory, velocities, accelerations) != Result.Working:
+            raise RuntimeError(f'{sections} sections: through-motion calculation failed')
+        if len(trajectory.intermediate_durations) != sections or abs(trajectory.duration - sections / 4.0) > 1e-8:
+            raise RuntimeError(f'{sections} sections: unexpected chain duration or size')
+        for name in ('early', 'near-end', 'near-end-window'):
+            positions = [(256 + k) / 4096.0 for k in range(batch_size)]
+            if name != 'early':
+                positions = [inp.target_position[0] - offset for offset in positions]
+            time_after = trajectory.duration - 0.25 if name == 'near-end-window' else 0.0
+            # Check the constant-speed samples and public query window outside timing.
+            for position in positions:
+                p, v, a = trajectory.at_time(position)
+                crossing = trajectory.get_first_time_at_position(0, position, time_after)
+                if abs(p[0] - position) > 1e-9 or abs(v[0] - 1.0) > 1e-9 or abs(a[0]) > 1e-9:
+                    raise RuntimeError(f'{sections} sections: unexpected through-motion sample')
+                if crossing is None or not max(0.0, time_after) <= crossing <= trajectory.duration:
+                    raise RuntimeError(f'{sections} sections: query returned outside its window')
+                if abs(trajectory.at_time(crossing)[0][0] - position) > 1e-9:
+                    raise RuntimeError(f'{sections} sections: query returned the wrong position')
+            measurements = []
+            for repetition in range(12):
+                start = time.perf_counter_ns()
+                for position in positions:
+                    trajectory.get_first_time_at_position(0, position, time_after)
+                elapsed_us = (time.perf_counter_ns() - start) / 1000 / batch_size
+                if repetition > 0:  # Exclude one complete warm-up batch.
+                    measurements.append(elapsed_us)
+            print(f'{sections:>10} {name:>18} {statistics.median(measurements):>19.3f}')
+
+
 def main():
     coefficients = [1.0, 0.8, 0.6, -0.4, -0.2, 0.0]
     cases = [
@@ -82,6 +126,8 @@ def main():
             if repetition > 0:
                 measurements.append(elapsed_us)
         print(f'{dofs:>6} {count:>12} {statistics.median(measurements):>23.1f}')
+
+    benchmark_position_queries()
 
 
 if __name__ == '__main__':
