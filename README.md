@@ -23,6 +23,8 @@ Ruckig generates trajectories on-the-fly, allowing robots and machines to react 
 
 More information can be found at [ruckig.com](https://ruckig.com) and in the corresponding paper [Jerk-limited Real-time Trajectory Generation with Arbitrary Target States](https://arxiv.org/abs/2105.04830). Documentation is published at [docs.ruckig.com](https://docs.ruckig.com).
 
+This fork adds [fully local multi-waypoint planning and replay](#fully-local-multi-waypoint-calculation), including automatic intermediate-state selection, and [local position-bound checks](#local-position-bounds). The sections below describe these APIs and their supported inputs.
+
 
 ## Installation
 
@@ -44,10 +46,14 @@ sudo dpkg -i ruckig*.deb
 
 An example of using Ruckig in your CMake project is given by `examples/CMakeLists.txt`. However, you can also include Ruckig as a directory within your project and call `add_subdirectory(ruckig)` in your parent `CMakeLists.txt`.
 
+When updating this fork, rebuild the C++ library and dependent applications together.
+
 Ruckig is also available as a Python module, in particular for development or debugging purposes. The Ruckig *Community Version* can be installed from [PyPI](https://pypi.org/project/ruckig/) via
 ```bash
 pip install ruckig
 ```
+To use this fork's added local APIs in Python, install from the root of this checkout with `python -m pip install .`. A build without the cloud client uses `python -m pip install . --config-settings=cmake.define.BUILD_CLOUD_CLIENT=OFF`.
+
 When using CMake, the Python module can be built using the `BUILD_PYTHON_MODULE` flag. If you're only interested in the Python module (and not in the C++ library), you can build and install Ruckig via `pip install .`.
 
 
