@@ -603,6 +603,41 @@ mod tests {
     }
 
     #[test]
+    fn zero_jerk_reference_recovers_after_failed_stopping_baseline() {
+        use std::panic::{catch_unwind, AssertUnwindSafe};
+
+        let velocity = [-0.525_f64, 0.275];
+        let acceleration = [0.5_f64, -0.25];
+        let mut input = InputParameter::new(2);
+        input.current_velocity = velocity.to_vec();
+        input.current_acceleration = acceleration.to_vec();
+        input.target_position = (0..2).map(|d| 2.0 * velocity[d] + 2.0 * acceleration[d]).collect();
+        input.target_velocity = (0..2).map(|d| velocity[d] + 2.0 * acceleration[d]).collect();
+        input.target_acceleration = acceleration.to_vec();
+        input.max_velocity = vec![1.0, 1.0];
+        input.max_acceleration = vec![1.0, 1.0];
+        input.max_jerk = vec![0.0, 0.0];
+        let mut otg = Ruckig::new_direct_and_offline(2);
+        let mut trajectory = Trajectory::new_direct(2);
+        assert_eq!(otg.calculate(&mut input, &mut trajectory), Result::Working);
+        input.intermediate_positions = [0.5, 1.0].iter().map(|&t|
+            (0..2).map(|d| velocity[d] * t + acceleration[d] * t * t / 2.0).collect()
+        ).collect();
+        assert_eq!(otg.optimize_waypoints(&mut input, &mut trajectory, 0), Result::ErrorZeroLimits);
+        assert!(catch_unwind(AssertUnwindSafe(|| trajectory.at_time(0.0))).is_err());
+        assert_eq!(otg.optimize_waypoints(&mut input, &mut trajectory, 8), Result::Working);
+        assert!((trajectory.get_duration() - 2.0).abs() < 1e-12);
+        for time in [0.0, 0.125, 0.5, 1.0, 1.05, 1.1, 1.5, 2.0] {
+            let (positions, velocities, accelerations) = trajectory.at_time(time);
+            for d in 0..2 {
+                assert!((positions[d] - velocity[d] * time - acceleration[d] * time * time / 2.0).abs() < 1e-12);
+                assert!((velocities[d] - velocity[d] - acceleration[d] * time).abs() < 1e-12);
+                assert!((accelerations[d] - acceleration[d]).abs() < 1e-12);
+            }
+        }
+    }
+
+    #[test]
     fn invalid_sampling_panics_without_aborting() {
         use std::panic::{catch_unwind, AssertUnwindSafe};
 

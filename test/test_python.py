@@ -173,6 +173,16 @@ class WrapperRegressionTest(unittest.TestCase):
         self.input.intermediate_positions = [[3000.0], [6000.0]]
         self.assertEqual(Ruckig(1).calculate_waypoints(self.input, Trajectory(1)), Result.ErrorTrajectoryDuration)
 
+
+class LocalPlanningRegressionTest(unittest.TestCase):
+    def setUp(self):
+        self.input = InputParameter(1)
+        self.input.current_position = [0.0]
+        self.input.target_position = [1.0]
+        self.input.max_velocity = [1.0]
+        self.input.max_acceleration = [1.0]
+        self.input.max_jerk = [1.0]
+
     def test_automatic_waypoint_states(self):
         otg = Ruckig(1, 0.1)
         self.input.max_velocity = [2.0]
@@ -195,6 +205,33 @@ class WrapperRegressionTest(unittest.TestCase):
             otg.optimize_waypoints(self.input, optimized, max_iterations=65)
         with self.assertRaises(RuckigError):
             otg.update(optimized, OutputParameter(1))
+
+    def test_zero_jerk_reference_recovers_after_failed_stopping_baseline(self):
+        velocity, acceleration = [-0.525, 0.275], [0.5, -0.25]
+        inp, trajectory, otg = InputParameter(2), Trajectory(2), Ruckig(2)
+        inp.current_position = [0.0, 0.0]
+        inp.current_velocity, inp.current_acceleration = velocity, acceleration
+        inp.target_position = [2.0 * v + 2.0 * a for v, a in zip(velocity, acceleration)]
+        inp.target_velocity = [v + 2.0 * a for v, a in zip(velocity, acceleration)]
+        inp.target_acceleration = acceleration
+        inp.max_velocity = inp.max_acceleration = [1.0, 1.0]
+        inp.max_jerk = [0.0, 0.0]
+        self.assertEqual(otg.calculate(inp, trajectory), Result.Working)
+        inp.intermediate_positions = [
+            [v * t + a * t * t / 2.0 for v, a in zip(velocity, acceleration)]
+            for t in (0.5, 1.0)
+        ]
+        self.assertEqual(otg.optimize_waypoints(inp, trajectory, max_iterations=0), Result.ErrorZeroLimits)
+        with self.assertRaises(RuckigError):
+            trajectory.at_time(0.0)
+        self.assertEqual(otg.optimize_waypoints(inp, trajectory), Result.Working)
+        self.assertAlmostEqual(trajectory.duration, 2.0, places=12)
+        for time in (0.0, 0.125, 0.5, 1.0, 1.05, 1.1, 1.5, 2.0):
+            positions, velocities, accelerations = trajectory.at_time(time)
+            for axis, (v, a) in enumerate(zip(velocity, acceleration)):
+                self.assertAlmostEqual(positions[axis], v * time + a * time * time / 2.0, places=12)
+                self.assertAlmostEqual(velocities[axis], v + a * time, places=12)
+                self.assertAlmostEqual(accelerations[axis], a, places=12)
 
     def test_automatic_search_can_reject_trials_without_throwing(self):
         otg = Ruckig(1)
