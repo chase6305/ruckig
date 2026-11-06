@@ -295,7 +295,7 @@ cargo run --locked --release --example 17_local_waypoints
 
 The Cargo build currently includes the cloud client unconditionally and has no cloud-disable feature. The explicit local methods and offline replay above still make no cloud calls.
 
-For explicit local chains, `pass_to_input` also removes every waypoint reached by the output time, including when one cycle crosses several sections. Repeating the call with the same output keeps the remaining list unchanged. Apply it before editing the next target or waypoint list. Before replanning, trim any caller-owned waypoint velocity/acceleration arrays to match the remaining points. Ordinary cloud outputs retain their existing waypoint-removal behavior.
+For explicit local chains, `pass_to_input` also removes every waypoint reached by the output time, including when one cycle crosses several sections. Repeating the call with the same output keeps the remaining list unchanged. Apply it before editing the next target or waypoint list. Before replanning, trim any caller-owned waypoint velocity/acceleration arrays to match the remaining points and rebuild `per_section_minimum_duration` for the remaining intervals. Ordinary cloud outputs retain their existing waypoint-removal behavior.
 
 ### Input Parameter
 
