@@ -341,6 +341,35 @@ class LocalPlanningRegressionTest(unittest.TestCase):
         with self.assertRaises(RuckigError):
             trajectory.at_time(0.0)
 
+    def test_local_position_query_windows(self):
+        otg, trajectory = Ruckig(1), Trajectory(1)
+        prefix = 2.0 ** -53
+        after = math.nextafter(1.0, math.inf)
+        for speed, should_match in ((1.0, True), (2.0 ** 23, False)):
+            inp = InputParameter(1)
+            inp.current_position = [-speed * prefix]
+            inp.target_position = [2.0 * speed]
+            inp.current_velocity = inp.target_velocity = [speed]
+            inp.max_velocity = [2.0 * speed]
+            inp.max_acceleration = [2.0]
+            inp.max_jerk = [0.0]
+            inp.intermediate_positions = [[0.0], [speed]]
+            self.assertEqual(otg.calculate_waypoints(inp, trajectory, [[speed], [speed]], [[0.0], [0.0]]), Result.Working)
+            self.assertEqual(trajectory.intermediate_durations, [prefix, 1.0, 2.0])
+            crossing = trajectory.get_first_time_at_position(0, speed, after)
+            if should_match:
+                self.assertEqual(crossing, after)
+            else:
+                self.assertIsNone(crossing)
+
+        self.input.target_position = [3.0]
+        self.input.intermediate_positions = [[1.0], [2.0]]
+        self.assertEqual(otg.calculate_waypoints(self.input, trajectory), Result.Working)
+        duration = trajectory.duration
+        position = trajectory.at_time(duration)[0][0]
+        self.assertEqual(trajectory.get_first_time_at_position(0, position, duration), duration)
+        self.assertIsNone(trajectory.get_first_time_at_position(0, position, math.nextafter(duration, math.inf)))
+
     def test_dense_curved_waypoints(self):
         inp = InputParameter(2)
         inp.target_position = [1.0, 1.0]

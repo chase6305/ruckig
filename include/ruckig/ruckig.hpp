@@ -624,7 +624,7 @@ public:
                         time = candidate_time;
                         return true;
                     };
-                    const auto crossing = reference.get_first_time_at_position(dof, input.intermediate_positions[i][dof], time);
+                    const auto crossing = reference.template get_first_time_at_position_impl<false>(dof, input.intermediate_positions[i][dof], time);
                     if (crossing && matches(*crossing)) {
                         continue;
                     }
@@ -915,7 +915,7 @@ public:
                 }
                 bool valid = true;
                 for (size_t i = 0; valid && i < count; ++i) {
-                    const auto crossing = path.get_first_time_at_position(0, distances[i + 1]);
+                    const auto crossing = path.template get_first_time_at_position_impl<false>(0, distances[i + 1]);
                     if (!crossing) {
                         valid = false;
                         break;
