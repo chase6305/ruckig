@@ -326,6 +326,7 @@ std::optional<Vector> min_acceleration; // If not given, the negative maximum ac
 
 std::array<bool, DOFs> enabled; // Initialized to true
 std::optional<double> minimum_duration;
+std::optional<std::vector<double>> per_section_minimum_duration; // Local C++/Python chains: one minimum per original interval
 std::optional<double> interrupt_calculation_duration; // [µs], (only in Pro Version)
 
 ControlInterface control_interface; // The default position interface controls the full kinematic state.
@@ -338,7 +339,7 @@ std::optional<Vector<Synchronization>> per_dof_synchronization; // Sets the sync
 
 On top of the current state, target state, and constraints, Ruckig allows for a few more advanced settings:
 - A *minimum* velocity and acceleration can be specified - these should be a negative number. If they are not given, the negative maximum velocity or acceleration will be used (similar to the jerk limit). For example, this might be useful in human robot collaboration settings with a different velocity limit towards a human. Or, when switching between different moving coordinate frames like picking from a conveyer belt.
-- You can overwrite the global kinematic limits to specify limits for each section between two waypoints separately by using e.g. `per_section_max_velocity`.
+- The ordinary cloud path sends per-section kinematic limits such as `per_section_max_velocity`. Explicit local chains reject per-section kinematic/position limits; local C++/Python chains support `per_section_minimum_duration` as described above.
 - If a DoF is not *enabled*, it will be ignored in the calculation. Ruckig will output a trajectory with constant acceleration for those DoFs.
 - A *minimum duration* can be optionally given. Note that Ruckig can not guarantee an exact, but only a minimum duration of the trajectory.
 - The control interface (position or velocity control) can be switched easily. For example, a stop trajectory or visual servoing can be easily implemented with the velocity interface.
