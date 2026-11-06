@@ -92,6 +92,8 @@ bool PositionSecondOrderStep1::time_all_single_step(Profile* profile, double vMa
 
 
 bool PositionSecondOrderStep1::get_profile(const Profile& input, Block& block) {
+    valid_profiles_overflow = false;
+
     // Zero-limits special case
     if (_vMax == 0.0 && _vMin == 0.0) {
         auto& p = block.p_min;
@@ -135,6 +137,10 @@ bool PositionSecondOrderStep1::get_profile(const Profile& input, Block& block) {
     }
 
 return_block:
+    if (valid_profiles_overflow) {
+        return false;
+    }
+
     return Block::calculate_block(block, valid_profiles, std::distance(start, profile));
 }
 

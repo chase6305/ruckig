@@ -30,6 +30,7 @@ class Trajectory {
     friend class TargetCalculator<DOFs, CustomVector>;
     friend class WaypointsCalculator<DOFs, CustomVector>;
     template<size_t, template<class, size_t> class, bool> friend class Ruckig;
+    template<size_t, template<class, size_t> class> friend class OutputParameter;
 
     Container<Vector<Profile>> profiles;
     // Allocated only for explicit local multi-waypoint calculations.
@@ -39,6 +40,10 @@ class Trajectory {
     double duration {0.0};
     bool calculated {false};
     bool profiles_calculated {false};
+#if defined WITH_CLOUD_CLIENT
+    // The cloud path does not populate independent minimum durations.
+    bool independent_min_durations_available {true};
+#endif
     Container<double> cumulative_times;
 
     Vector<double> independent_min_durations;
@@ -270,6 +275,17 @@ public:
         });
     }
 
+    //! Get the kinematic state directly into caller-owned contiguous buffers.
+    void at_time(double time, std::span<double> new_position, std::span<double> new_velocity, std::span<double> new_acceleration) const {
+        if (degrees_of_freedom != new_position.size() || degrees_of_freedom != new_velocity.size() || degrees_of_freedom != new_acceleration.size()) {
+            throw RuckigError("mismatch in degrees of freedom (vector size).");
+        }
+        size_t new_section;
+        state_to_integrate_from(time, new_section, [&](size_t dof, double t, double p, double v, double a, double j) {
+            std::tie(new_position[dof], new_velocity[dof], new_acceleration[dof]) = integrate(t, p, v, a, j);
+        });
+    }
+
     //! Get the position at a given time
     void at_time(double time, Vector<double>& new_position) const {
         if constexpr (DOFs == 0) {
@@ -347,10 +363,16 @@ public:
     }
 
     //! Get the minimum duration of each independent DoF
+    //! Cloud trajectories do not provide this diagnostic and raise RuckigError.
     Vector<double> get_independent_min_durations() const {
         if ((!calculated && !profiles_calculated) || !has_valid_profile_structure()) {
             throw RuckigError("independent durations require a calculated trajectory.");
         }
+#if defined WITH_CLOUD_CLIENT
+        if (!independent_min_durations_available) {
+            throw RuckigError("independent durations are unavailable for cloud trajectories.");
+        }
+#endif
         return independent_min_durations;
     }
 
@@ -367,19 +389,35 @@ public:
         }
     }
 
-    //! Get the time that this trajectory passes a specific position of a given DoF the first time
-    std::optional<double> get_first_time_at_position(size_t dof, double position, double time_after=0.0) const {
-        if (!calculated || !has_valid_profile_structure() || dof >= degrees_of_freedom || !std::isfinite(position) || !std::isfinite(time_after)) {
+private:
+    // Raw times only propose reference states; Ruckig revalidates every resulting chain.
+    template<bool enforce_time_bounds>
+    std::optional<double> get_first_time_at_position_impl(size_t dof, double position, double time_after=0.0) const {
+        if (!calculated || !has_valid_profile_structure() || dof >= degrees_of_freedom || !std::isfinite(position) || !std::isfinite(time_after) || (enforce_time_bounds && time_after > duration)) {
             return std::nullopt;
         }
         const auto profiles = profiles_view();
         const auto cumulative_times = times_view();
-
-        const auto find_in_step = [&](double start, double duration, double p, double v, double a, double j) -> std::optional<double> {
-            const double earliest = std::max(0.0, time_after - start);
-            if (earliest > duration) {
+        const double earliest_time = std::max(0.0, time_after);
+        const auto bounded_candidate = [&](double candidate) -> std::optional<double> {
+            if (earliest_time <= candidate && candidate <= duration) {
+                return candidate;
+            }
+            if (std::isnan(candidate)) {
                 return std::nullopt;
             }
+            const double bounded_time = std::clamp(candidate, earliest_time, duration);
+            bool matches = false;
+            size_t section;
+            state_to_integrate_from(bounded_time, section, [&](size_t axis, double t, double p, double v, double a, double j) {
+                if (axis == dof) {
+                    matches = std::abs(std::get<0>(integrate(t, p, v, a, j)) - position) < 1e-9;
+                }
+            });
+            return matches ? std::optional<double>(bounded_time) : std::nullopt;
+        };
+
+        const auto find_in_step = [&](double start, double duration, double p, double v, double a, double j, double earliest) -> std::optional<double> {
             if (std::abs(std::get<0>(integrate(earliest, p, v, a, j)) - position) < 1e-9) {
                 return start + earliest;
             }
@@ -394,6 +432,26 @@ public:
             }
             return first ? std::optional<double>(start + *first) : std::nullopt;
         };
+        const auto retry_bounded_step = [&](double candidate, double start, double duration, double p, double v, double a, double j, double earliest) -> std::optional<double> {
+            if (auto bounded = bounded_candidate(candidate)) {
+                return bounded;
+            }
+            std::optional<double> first;
+            for (double t: roots::solve_cubic(j / 6, a / 2, v, p - position)) {
+                if (earliest <= t && t <= duration) {
+                    const double global_time = start + t;
+                    auto bounded = earliest_time <= global_time && global_time <= this->duration
+                        ? std::optional<double>(global_time) : bounded_candidate(global_time);
+                    if (bounded && (!first || *bounded < *first)) {
+                        first = bounded;
+                    }
+                }
+            }
+            if (!first && std::abs(std::get<0>(integrate(duration, p, v, a, j)) - position) < 1e-9) {
+                return bounded_candidate(start + duration);
+            }
+            return first;
+        };
         for (size_t i = 0; i < profiles.size(); ++i) {
             const double section_time = (i > 0) ? cumulative_times[i-1] : 0.0;
             const auto& profile = profiles[i][dof];
@@ -401,8 +459,12 @@ public:
             if (profile.brake.duration > 0.0) {
                 for (size_t step = 0; step < 2; ++step) {
                     if (profile.brake.t[step] > 0.0) {
-                        if (auto time = find_in_step(start, profile.brake.t[step], profile.brake.p[step], profile.brake.v[step], profile.brake.a[step], profile.brake.j[step])) {
-                            return time;
+                        const double earliest = std::max(0.0, time_after - start);
+                        if (!(earliest > profile.brake.t[step])) {
+                            if (auto time = find_in_step(start, profile.brake.t[step], profile.brake.p[step], profile.brake.v[step], profile.brake.a[step], profile.brake.j[step], earliest)) {
+                                if (!enforce_time_bounds || (earliest_time <= *time && *time <= duration)) return time;
+                                if (auto bounded = retry_bounded_step(*time, start, profile.brake.t[step], profile.brake.p[step], profile.brake.v[step], profile.brake.a[step], profile.brake.j[step], earliest)) return bounded;
+                            }
                         }
                         start += profile.brake.t[step];
                     }
@@ -411,18 +473,33 @@ public:
             if (profile.t_sum.back() > 0.0) {
                 for (size_t step = 0; step < 7; ++step) {
                     if (profile.t[step] > 0.0) {
-                        if (auto time = find_in_step(start, profile.t[step], profile.p[step], profile.v[step], profile.a[step], profile.j[step])) {
-                            return time;
+                        const double earliest = std::max(0.0, time_after - start);
+                        if (!(earliest > profile.t[step])) {
+                            if (auto time = find_in_step(start, profile.t[step], profile.p[step], profile.v[step], profile.a[step], profile.j[step], earliest)) {
+                                if (!enforce_time_bounds || (earliest_time <= *time && *time <= duration)) return time;
+                                if (auto bounded = retry_bounded_step(*time, start, profile.t[step], profile.p[step], profile.v[step], profile.a[step], profile.j[step], earliest)) return bounded;
+                            }
                         }
                         start += profile.t[step];
                     }
                 }
             }
-            if (auto time = find_in_step(start, std::max(0.0, cumulative_times[i] - start), profile.p.back(), profile.v.back(), profile.a.back(), 0.0)) {
-                return time;
+            const double tail_duration = std::max(0.0, cumulative_times[i] - start);
+            const double earliest = std::max(0.0, time_after - start);
+            if (!(earliest > tail_duration)) {
+                if (auto time = find_in_step(start, tail_duration, profile.p.back(), profile.v.back(), profile.a.back(), 0.0, earliest)) {
+                    if (!enforce_time_bounds || (earliest_time <= *time && *time <= duration)) return time;
+                    if (auto bounded = retry_bounded_step(*time, start, tail_duration, profile.p.back(), profile.v.back(), profile.a.back(), 0.0, earliest)) return bounded;
+                }
             }
         }
         return std::nullopt;
+    }
+
+public:
+    //! Get the first matching time in [max(0, time_after), get_duration()].
+    std::optional<double> get_first_time_at_position(size_t dof, double position, double time_after=0.0) const {
+        return get_first_time_at_position_impl<true>(dof, position, time_after);
     }
 };
 

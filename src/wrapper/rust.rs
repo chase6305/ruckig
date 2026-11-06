@@ -86,15 +86,22 @@ pub struct TrajectoryRef<'a> {
     inner: &'a ffi::Trajectory,
 }
 
+fn traj_at_time_into_impl(inner: &ffi::Trajectory, time: f64, dofs: usize, pos: &mut [f64], vel: &mut [f64], acc: &mut [f64]) {
+    assert_eq!(pos.len(), dofs, "sampling position buffer has the wrong length");
+    assert_eq!(vel.len(), dofs, "sampling velocity buffer has the wrong length");
+    assert_eq!(acc.len(), dofs, "sampling acceleration buffer has the wrong length");
+    unsafe {
+        ffi::traj_at_time(inner, time, pos.as_mut_ptr(), vel.as_mut_ptr(), acc.as_mut_ptr(), dofs)
+            .expect("trajectory sampling requires a calculated trajectory and a finite time");
+    }
+}
+
 fn traj_at_time_impl(inner: &ffi::Trajectory, time: f64) -> (Vec<f64>, Vec<f64>, Vec<f64>) {
     let dofs = ffi::traj_get_dofs(inner);
     let mut pos = vec![0.0f64; dofs];
     let mut vel = vec![0.0f64; dofs];
     let mut acc = vec![0.0f64; dofs];
-    unsafe {
-        ffi::traj_at_time(inner, time, pos.as_mut_ptr(), vel.as_mut_ptr(), acc.as_mut_ptr(), dofs)
-            .expect("trajectory sampling requires a calculated trajectory and a finite time");
-    }
+    traj_at_time_into_impl(inner, time, dofs, &mut pos, &mut vel, &mut acc);
     (pos, vel, acc)
 }
 
@@ -115,6 +122,13 @@ impl Trajectory {
     pub fn at_time(&self, time: f64) -> (Vec<f64>, Vec<f64>, Vec<f64>) {
         traj_at_time_impl(&self.0, time)
     }
+
+    /// Sample directly into reusable buffers without allocating.
+    /// Panics for an invalid trajectory, nonfinite time, or buffer lengths that do not match its DoFs.
+    pub fn at_time_into(&self, time: f64, pos: &mut [f64], vel: &mut [f64], acc: &mut [f64]) {
+        let dofs = ffi::traj_get_dofs(&self.0);
+        traj_at_time_into_impl(&self.0, time, dofs, pos, vel, acc);
+    }
 }
 
 impl<'a> TrajectoryRef<'a> {
@@ -125,6 +139,13 @@ impl<'a> TrajectoryRef<'a> {
     /// Panics if the trajectory has not been calculated successfully or time is not finite.
     pub fn at_time(&self, time: f64) -> (Vec<f64>, Vec<f64>, Vec<f64>) {
         traj_at_time_impl(self.inner, time)
+    }
+
+    /// Sample directly into reusable buffers without allocating.
+    /// Panics for an invalid trajectory, nonfinite time, or buffer lengths that do not match its DoFs.
+    pub fn at_time_into(&self, time: f64, pos: &mut [f64], vel: &mut [f64], acc: &mut [f64]) {
+        let dofs = ffi::traj_get_dofs(self.inner);
+        traj_at_time_into_impl(self.inner, time, dofs, pos, vel, acc);
     }
 }
 
@@ -412,6 +433,29 @@ mod tests {
     }
 
     #[test]
+    fn pass_to_input_removes_every_crossed_waypoint() {
+        let mut otg = Ruckig::new_direct(1, 5.0);
+        let mut input = input();
+        input.target_position = vec![4.0];
+        input.intermediate_positions = vec![vec![1.0], vec![2.0], vec![3.0]];
+        input.max_velocity = vec![2.0];
+        input.max_acceleration = vec![2.0];
+        input.max_jerk = vec![4.0];
+        let mut trajectory = Trajectory::new_direct(1);
+        assert_eq!(otg.calculate_waypoints(&mut input, &mut trajectory), Result::Working);
+        let mut output = OutputParameter::new_direct(1);
+        assert_eq!(otg.update_trajectory(&trajectory, &mut output), Result::Working);
+        assert_eq!(output.new_section, 2);
+        output.pass_to_input(&mut input);
+        assert_eq!(input.intermediate_positions, vec![vec![3.0]]);
+        output.pass_to_input(&mut input);
+        assert_eq!(input.intermediate_positions, vec![vec![3.0]]);
+        assert_eq!(otg.update_current_trajectory(&mut output), Result::Finished);
+        output.pass_to_input(&mut input);
+        assert!(input.intermediate_positions.is_empty());
+    }
+
+    #[test]
     fn pass_to_input_preserves_more_than_256_remaining_waypoints() {
         let mut otg = Ruckig::new_direct(2, 0.01);
         let mut input = InputParameter::new(2);
@@ -556,6 +600,41 @@ mod tests {
         assert_eq!(otg.optimize_waypoints(&mut input, &mut trajectory, 65), Result::ErrorInvalidInput);
         input.intermediate_positions[0].clear();
         assert_eq!(otg.optimize_waypoints(&mut input, &mut trajectory, 8), Result::ErrorInvalidInput);
+    }
+
+    #[test]
+    fn zero_jerk_reference_recovers_after_failed_stopping_baseline() {
+        use std::panic::{catch_unwind, AssertUnwindSafe};
+
+        let velocity = [-0.525_f64, 0.275];
+        let acceleration = [0.5_f64, -0.25];
+        let mut input = InputParameter::new(2);
+        input.current_velocity = velocity.to_vec();
+        input.current_acceleration = acceleration.to_vec();
+        input.target_position = (0..2).map(|d| 2.0 * velocity[d] + 2.0 * acceleration[d]).collect();
+        input.target_velocity = (0..2).map(|d| velocity[d] + 2.0 * acceleration[d]).collect();
+        input.target_acceleration = acceleration.to_vec();
+        input.max_velocity = vec![1.0, 1.0];
+        input.max_acceleration = vec![1.0, 1.0];
+        input.max_jerk = vec![0.0, 0.0];
+        let mut otg = Ruckig::new_direct_and_offline(2);
+        let mut trajectory = Trajectory::new_direct(2);
+        assert_eq!(otg.calculate(&mut input, &mut trajectory), Result::Working);
+        input.intermediate_positions = [0.5, 1.0].iter().map(|&t|
+            (0..2).map(|d| velocity[d] * t + acceleration[d] * t * t / 2.0).collect()
+        ).collect();
+        assert_eq!(otg.optimize_waypoints(&mut input, &mut trajectory, 0), Result::ErrorZeroLimits);
+        assert!(catch_unwind(AssertUnwindSafe(|| trajectory.at_time(0.0))).is_err());
+        assert_eq!(otg.optimize_waypoints(&mut input, &mut trajectory, 8), Result::Working);
+        assert!((trajectory.get_duration() - 2.0).abs() < 1e-12);
+        for time in [0.0, 0.125, 0.5, 1.0, 1.05, 1.1, 1.5, 2.0] {
+            let (positions, velocities, accelerations) = trajectory.at_time(time);
+            for d in 0..2 {
+                assert!((positions[d] - velocity[d] * time - acceleration[d] * time * time / 2.0).abs() < 1e-12);
+                assert!((velocities[d] - velocity[d] - acceleration[d] * time).abs() < 1e-12);
+                assert!((accelerations[d] - acceleration[d]).abs() < 1e-12);
+            }
+        }
     }
 
     #[test]
@@ -736,5 +815,101 @@ impl Ruckig {
             return Result::ErrorInvalidInput;
         }
         Result::from(ffi::ruckig_optimize_waypoints(self.0.pin_mut(), &input.inner, trajectory.0.pin_mut(), max_iterations))
+    }
+}
+
+#[cfg(test)]
+mod buffer_sampling_tests {
+    use super::*;
+    use std::panic::{catch_unwind, AssertUnwindSafe};
+
+    fn make_chain() -> (Ruckig, InputParameter, Trajectory) {
+        let mut input = InputParameter::new(3);
+        input.current_position = vec![0.0, 0.0, 0.0];
+        input.current_velocity = vec![0.3, 0.1, 0.0];
+        input.current_acceleration = vec![0.1, 0.0, 0.0];
+        input.target_position = vec![3.0, 1.5, 0.0];
+        input.target_velocity = vec![0.2, 0.1, 0.0];
+        input.target_acceleration = vec![-0.1, 0.0, 0.0];
+        input.max_velocity = vec![2.0; 3];
+        input.max_acceleration = vec![2.0; 3];
+        input.max_jerk = vec![4.0; 3];
+        input.intermediate_positions = vec![vec![1.0, 0.5, 0.0], vec![1.0, 0.5, 0.0], vec![2.0, 1.0, 0.0]];
+        let velocities = vec![vec![0.5, 0.2, 0.0]; 3];
+        let accelerations = vec![vec![0.1, 0.0, 0.0]; 3];
+        let mut otg = Ruckig::new_direct(3, 0.01);
+        let mut trajectory = Trajectory::new_direct(3);
+        assert_eq!(otg.calculate_waypoints_with_states(&mut input, &mut trajectory, &velocities, &accelerations), Result::Working);
+        (otg, input, trajectory)
+    }
+
+    #[test]
+    fn reusable_sampling_matches_owned_and_borrowed_trajectories() {
+        let (mut otg, _, trajectory) = make_chain();
+        let mut output = OutputParameter::new_direct(3);
+        assert_eq!(otg.update_trajectory(&trajectory, &mut output), Result::Working);
+        let view = output.trajectory();
+        let mut p = [0.0; 3];
+        let mut v = [0.0; 3];
+        let mut a = [0.0; 3];
+        for index in 0..=202 {
+            let time = trajectory.get_duration() * (index as f64 - 1.0) / 200.0;
+            let expected = trajectory.at_time(time);
+            trajectory.at_time_into(time, &mut p, &mut v, &mut a);
+            for (actual, wanted) in [(&p[..], &expected.0[..]), (&v[..], &expected.1[..]), (&a[..], &expected.2[..])] {
+                assert!(actual.iter().zip(wanted).all(|(x, y)| x.to_bits() == y.to_bits()));
+            }
+            view.at_time_into(time, &mut p, &mut v, &mut a);
+            assert_eq!(p[..], expected.0[..]);
+            assert_eq!(v[..], expected.1[..]);
+            assert_eq!(a[..], expected.2[..]);
+        }
+    }
+
+    #[test]
+    fn reusable_sampling_rejects_bad_buffers_and_invalid_samples_without_writes() {
+        let (mut otg, mut input, mut trajectory) = make_chain();
+        let mut output = OutputParameter::new_direct(3);
+        assert_eq!(otg.update_trajectory(&trajectory, &mut output), Result::Working);
+        {
+            let view = output.trajectory();
+            for borrowed in [false, true] {
+                for which in 0..3 {
+                    for length in [0, 2, 4] {
+                        let mut p = vec![11.0; if which == 0 { length } else { 3 }];
+                        let mut v = vec![22.0; if which == 1 { length } else { 3 }];
+                        let mut a = vec![33.0; if which == 2 { length } else { 3 }];
+                        let expected = (p.clone(), v.clone(), a.clone());
+                        let result = catch_unwind(AssertUnwindSafe(|| {
+                            if borrowed { view.at_time_into(0.5, &mut p, &mut v, &mut a); }
+                            else { trajectory.at_time_into(0.5, &mut p, &mut v, &mut a); }
+                        }));
+                        assert!(result.is_err());
+                        assert_eq!((p, v, a), expected);
+                    }
+                }
+                for time in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+                    let mut p = [11.0; 3]; let mut v = [22.0; 3]; let mut a = [33.0; 3];
+                    let result = catch_unwind(AssertUnwindSafe(|| {
+                        if borrowed { view.at_time_into(time, &mut p, &mut v, &mut a); }
+                        else { trajectory.at_time_into(time, &mut p, &mut v, &mut a); }
+                    }));
+                    assert!(result.is_err());
+                    assert_eq!((p, v, a), ([11.0; 3], [22.0; 3], [33.0; 3]));
+                }
+            }
+        }
+        input.max_position = vec![0.5; 3];
+        assert_eq!(otg.calculate_waypoints(&mut input, &mut trajectory), Result::ErrorPositionalLimits);
+        assert_eq!(otg.update_trajectory(&trajectory, &mut output), Result::ErrorInvalidInput);
+        let fresh = Trajectory::new_direct(3);
+        for sample in [&fresh, &trajectory] {
+            let mut p = [11.0; 3]; let mut v = [22.0; 3]; let mut a = [33.0; 3];
+            assert!(catch_unwind(AssertUnwindSafe(|| sample.at_time_into(0.0, &mut p, &mut v, &mut a))).is_err());
+            assert_eq!((p, v, a), ([11.0; 3], [22.0; 3], [33.0; 3]));
+        }
+        let mut p = [11.0; 3]; let mut v = [22.0; 3]; let mut a = [33.0; 3];
+        assert!(catch_unwind(AssertUnwindSafe(|| output.trajectory().at_time_into(0.0, &mut p, &mut v, &mut a))).is_err());
+        assert_eq!((p, v, a), ([11.0; 3], [22.0; 3], [33.0; 3]));
     }
 }

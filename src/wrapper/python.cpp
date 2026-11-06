@@ -182,8 +182,23 @@ limited by velocity, acceleration, and jerk constraints.";
         .def_ro("v", &BrakeProfile::v)
         .def_ro("p", &BrakeProfile::p);
 
-    nb::class_<Profile>(m, "Profile")
-        .def_ro("t", &Profile::t)
+    auto profile = nb::class_<Profile>(m, "Profile");
+    nb::enum_<Profile::ReachedLimits>(profile, "ReachedLimits")
+        .value("ACC0_ACC1_VEL", Profile::ReachedLimits::ACC0_ACC1_VEL)
+        .value("VEL", Profile::ReachedLimits::VEL)
+        .value("ACC0", Profile::ReachedLimits::ACC0)
+        .value("ACC1", Profile::ReachedLimits::ACC1)
+        .value("ACC0_ACC1", Profile::ReachedLimits::ACC0_ACC1)
+        .value("ACC0_VEL", Profile::ReachedLimits::ACC0_VEL)
+        .value("ACC1_VEL", Profile::ReachedLimits::ACC1_VEL)
+        .value("NONE", Profile::ReachedLimits::NONE);
+    nb::enum_<Profile::Direction>(profile, "Direction")
+        .value("UP", Profile::Direction::UP)
+        .value("DOWN", Profile::Direction::DOWN);
+    nb::enum_<Profile::ControlSigns>(profile, "ControlSigns")
+        .value("UDDU", Profile::ControlSigns::UDDU)
+        .value("UDUD", Profile::ControlSigns::UDUD);
+    profile.def_ro("t", &Profile::t)
         .def_ro("j", &Profile::j)
         .def_ro("a", &Profile::a)
         .def_ro("v", &Profile::v)

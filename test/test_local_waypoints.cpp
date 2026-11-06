@@ -827,3 +827,349 @@ TEST_CASE("local-filter-long-one-axis-route") {
     CHECK(otg.filter_intermediate_positions(input, {0.0}).empty());
     CHECK(otg.filter_intermediate_positions(input, {0.25}).empty());
 }
+
+TEST_CASE("local-filter-single-coordinate-windows") {
+    Ruckig<3> otg;
+    InputParameter<3> input;
+    input.current_position = {7.0, 0.0, -2.0};
+    input.target_position = {7.0, 4.0, -2.0};
+    input.intermediate_positions = {{7.0, 1.0, -2.0}, {7.0, 2.0, -2.0}, {7.0, 1.0, -2.0}, {7.0, 3.0, -2.0}};
+    const std::vector<std::array<double, 3>> reversals{{7.0, 2.0, -2.0}, {7.0, 1.0, -2.0}};
+    CHECK(otg.filter_intermediate_positions(input, {0.0, 0.0, 0.0}) == reversals);
+
+    // Constant interior coordinates need not match the motion's endpoints.
+    input.current_position = {0.0, 0.0, 0.0};
+    input.target_position = {5.0, 4.0, 3.0};
+    input.intermediate_positions = {{1.0, 2.0, 1.0}, {2.0, 2.0, 1.0}, {3.0, 2.0, 1.0}};
+    const std::vector<std::array<double, 3>> endpoints{{1.0, 2.0, 1.0}, {3.0, 2.0, 1.0}};
+    CHECK(otg.filter_intermediate_positions(input, {0.0, 0.0, 0.0}) == endpoints);
+
+    // A failed candidate starts a fresh window with a different varying axis.
+    input.target_position = {3.0, 3.0, 0.0};
+    input.intermediate_positions = {{1.0, 0.0, 0.0}, {2.0, 0.0, 0.0}, {3.0, 0.0, 0.0}, {3.0, 1.0, 0.0}, {3.0, 2.0, 0.0}};
+    const std::vector<std::array<double, 3>> corner{{3.0, 0.0, 0.0}};
+    CHECK(otg.filter_intermediate_positions(input, {0.0, 0.0, 0.0}) == corner);
+
+    // An endpoint-equal coordinate can contain an excursion that must be kept.
+    input.target_position = {3.0, 0.0, 0.0};
+    input.intermediate_positions = {{1.0, 0.0, 0.0}, {2.0, 0.1, 0.0}};
+    CHECK(otg.filter_intermediate_positions(input, {0.0, 0.0, 0.0}) == input.intermediate_positions);
+
+    const double huge = std::numeric_limits<double>::max();
+    input.current_position = {-huge, 7.0, 1.0};
+    input.target_position = {huge, 8.0, 2.0};
+    input.intermediate_positions = {{0.0, 7.0, 1.0}, {1.0, 7.0, 1.0}};
+    const std::vector<std::array<double, 3>> overflow{{1.0, 7.0, 1.0}};
+    CHECK(otg.filter_intermediate_positions(input, {0.0, 0.0, 0.0}) == overflow);
+}
+
+TEST_CASE("local-filter-long-multi-axis-one-coordinate-run") {
+    Ruckig<> otg(6);
+    InputParameter<> input(6);
+    input.current_position = {1.0, -2.0, 3.0, 0.0, -0.0, 0.0};
+    input.target_position = {1.0, -2.0, 3.0, 0.0, -0.0, 3001.0};
+    for (size_t i = 1; i <= 3000; ++i) {
+        auto point = input.current_position;
+        point[5] = static_cast<double>(i);
+        input.intermediate_positions.push_back(point);
+    }
+    CHECK(otg.filter_intermediate_positions(input, {0.0, 0.0, 0.0, 0.0, 0.0, 0.0}).empty());
+    input.intermediate_positions.assign(3000, input.current_position);
+    input.target_position = input.current_position;
+    CHECK(otg.filter_intermediate_positions(input, {0.0, 0.0, 0.0, 0.0, 0.0, 0.0}).empty());
+}
+
+template<size_t N>
+void check_span_sampling() {
+    auto input = make_input<N>(3);
+    auto otg = []() {
+        if constexpr (N == 0) {
+            return Ruckig<N>(3);
+        } else {
+            return Ruckig<N>();
+        }
+    }();
+    const auto make_trajectory = []() {
+        if constexpr (N == 0) {
+            return Trajectory<N>(3);
+        } else {
+            return Trajectory<N>();
+        }
+    };
+    auto trajectory = make_trajectory();
+    input.target_position = {3.0, 1.5, 0.0};
+    input.current_velocity = {3.0, 0.0, 0.0};
+    input.target_velocity = {0.2, 0.1, 0.0};
+    input.target_acceleration = {-0.1, 0.0, 0.0};
+    input.min_position = {-10.0, -10.0, -10.0};
+    input.max_position = {10.0, 10.0, 10.0};
+    input.intermediate_positions = {{1.0, 0.5, 0.0}, {1.0, 0.5, 0.0}, {2.0, 1.0, 0.0}};
+    auto intermediate_velocity = input.current_velocity;
+    auto intermediate_acceleration = input.current_acceleration;
+    intermediate_velocity = {0.5, 0.2, 0.0};
+    intermediate_acceleration = {0.1, 0.0, 0.0};
+    const std::vector<decltype(intermediate_velocity)> velocities(3, intermediate_velocity);
+    const std::vector<decltype(intermediate_acceleration)> accelerations(3, intermediate_acceleration);
+    REQUIRE(otg.calculate_waypoints(input, trajectory, velocities, accelerations) == Result::Working);
+
+    auto times = trajectory.get_intermediate_durations();
+    REQUIRE(times.size() == 4);
+    CHECK(times[0] == times[1]);
+    const double braking = trajectory.get_profiles().front()[0].brake.duration;
+    REQUIRE(braking > 0.0);
+    times.insert(times.end(), {-0.1, 0.0, braking / 2.0, trajectory.get_duration() + 0.25});
+    for (size_t k = 0; k <= 200; ++k) {
+        times.push_back(trajectory.get_duration() * k / 200.0);
+    }
+
+    std::array<double, 5> position_storage {}, velocity_storage {}, acceleration_storage {};
+    auto position = std::span(position_storage).subspan(1, 3);
+    auto velocity = std::span(velocity_storage).subspan(1, 3);
+    auto acceleration = std::span(acceleration_storage).subspan(1, 3);
+    const auto reset_buffers = [&]() {
+        position_storage.fill(11.0);
+        velocity_storage.fill(22.0);
+        acceleration_storage.fill(33.0);
+    };
+    const auto check_untouched = [&]() {
+        for (double value: position_storage) {
+            CHECK(value == 11.0);
+        }
+        for (double value: velocity_storage) {
+            CHECK(value == 22.0);
+        }
+        for (double value: acceleration_storage) {
+            CHECK(value == 33.0);
+        }
+    };
+    for (double time: times) {
+        reset_buffers();
+        auto expected_position = input.current_position;
+        auto expected_velocity = input.current_velocity;
+        auto expected_acceleration = input.current_acceleration;
+        trajectory.at_time(time, expected_position, expected_velocity, expected_acceleration);
+        trajectory.at_time(time, position, velocity, acceleration);
+        for (size_t d = 0; d < 3; ++d) {
+            CHECK(position[d] == expected_position[d]);
+            CHECK(velocity[d] == expected_velocity[d]);
+            CHECK(acceleration[d] == expected_acceleration[d]);
+        }
+        CHECK(position_storage.front() == 11.0);
+        CHECK(position_storage.back() == 11.0);
+        CHECK(velocity_storage.front() == 22.0);
+        CHECK(velocity_storage.back() == 22.0);
+        CHECK(acceleration_storage.front() == 33.0);
+        CHECK(acceleration_storage.back() == 33.0);
+    }
+
+    for (size_t output = 0; output < 3; ++output) {
+        for (size_t count: {0, 2, 4, 5}) {
+            reset_buffers();
+            auto sampled_position = output == 0 ? std::span(position_storage).first(count) : position;
+            auto sampled_velocity = output == 1 ? std::span(velocity_storage).first(count) : velocity;
+            auto sampled_acceleration = output == 2 ? std::span(acceleration_storage).first(count) : acceleration;
+            CHECK_THROWS_AS(trajectory.at_time(0.25, sampled_position, sampled_velocity, sampled_acceleration), RuckigError);
+            check_untouched();
+        }
+    }
+    const double infinity = std::numeric_limits<double>::infinity();
+    for (double time: {infinity, -infinity, std::numeric_limits<double>::quiet_NaN()}) {
+        reset_buffers();
+        CHECK_THROWS_AS(trajectory.at_time(time, position, velocity, acceleration), RuckigError);
+        check_untouched();
+    }
+
+    auto fresh = make_trajectory();
+    reset_buffers();
+    CHECK_THROWS_AS(fresh.at_time(0.0, position, velocity, acceleration), RuckigError);
+    check_untouched();
+    input.max_position = {0.5, 0.5, 0.5};
+    CHECK(otg.calculate_waypoints(input, trajectory, velocities, accelerations) == Result::ErrorPositionalLimits);
+    reset_buffers();
+    CHECK_THROWS_AS(trajectory.at_time(0.0, position, velocity, acceleration), RuckigError);
+    check_untouched();
+}
+
+TEST_CASE("contiguous-sampling-buffers-validate-and-preserve-state") {
+    check_span_sampling<3>();
+    check_span_sampling<0>();
+}
+
+
+TEST_CASE("reference-crossings-can-be-ambiguous-in-every-moving-axis") {
+    Ruckig<2> otg;
+    for (auto synchronization: {Synchronization::Time, Synchronization::Phase}) {
+        for (size_t points: {1, 3}) {
+            auto input = make_input<2>();
+            input.current_velocity = {-1.0, -0.5};
+            input.target_position = {0.5, 0.2};
+            input.min_position = {-10.0, -10.0};
+            input.max_position = {10.0, 10.0};
+            input.synchronization = synchronization;
+            Trajectory<2> reference, optimized;
+            REQUIRE(otg.calculate(input, reference) == Result::Working);
+            for (size_t i = 0; i < points; ++i) {
+                std::array<double, 2> p;
+                reference.at_time(reference.get_duration() * (0.5 + 0.05 * i), p);
+                input.intermediate_positions.push_back(p);
+            }
+            for (size_t d = 0; d < 2; ++d) {
+                const auto crossing = reference.get_first_time_at_position(d, input.intermediate_positions.front()[d]);
+                REQUIRE(crossing.has_value());
+                std::array<double, 2> p;
+                reference.at_time(*crossing, p);
+                CHECK(std::abs(p[1 - d] - input.intermediate_positions.front()[1 - d]) > 1e-4);
+            }
+            REQUIRE(otg.optimize_waypoints(input, optimized) == Result::Working);
+            CHECK(optimized.get_duration() == doctest::Approx(reference.get_duration()).epsilon(1e-9));
+            const auto times = optimized.get_intermediate_durations();
+            REQUIRE(times.size() == points + 1);
+            for (size_t i = 0; i < points; ++i) {
+                std::array<double, 2> p, v, a;
+                optimized.at_time(times[i], p, v, a);
+                for (size_t d = 0; d < 2; ++d) {
+                    CHECK(p[d] == doctest::Approx(input.intermediate_positions[i][d]).epsilon(1e-8));
+                }
+                if (i > 0) {
+                    CHECK(times[i] > times[i - 1]);
+                }
+            }
+            check_sampled_limits(input, optimized);
+        }
+    }
+}
+
+TEST_CASE("later-reference-crossings-retain-static-axes-and-order") {
+    Ruckig<> otg(3);
+    auto input = make_input<0>(3);
+    input.current_velocity = {-1.0, -0.5, 0.0};
+    input.target_position = {0.5, 0.2, 0.0};
+    input.max_velocity[2] = input.max_acceleration[2] = input.max_jerk[2] = 0.0;
+    input.min_position = {-10.0, -10.0, 0.0};
+    input.max_position = {10.0, 10.0, 0.0};
+    Trajectory<> reference(3), optimized(3);
+    REQUIRE(otg.calculate(input, reference) == Result::Working);
+    std::vector<double> first(3), second(3);
+    reference.at_time(reference.get_duration() * 0.5, first);
+    reference.at_time(reference.get_duration() * 0.6, second);
+    input.intermediate_positions = {first, first, second};
+    REQUIRE(otg.optimize_waypoints(input, optimized) == Result::Working);
+    CHECK(optimized.get_duration() == doctest::Approx(reference.get_duration()).epsilon(1e-9));
+    CHECK(optimized.get_intermediate_durations()[0] == optimized.get_intermediate_durations()[1]);
+    check_sampled_limits(input, optimized);
+
+    input.intermediate_positions = {second, first};
+    REQUIRE(otg.optimize_waypoints(input, optimized) == Result::Working);
+    CHECK(optimized.get_duration() > reference.get_duration() + 1e-3);
+    check_sampled_limits(input, optimized);
+
+    input.intermediate_positions = {first};
+    input.min_position[0] = -0.3;
+    CHECK(otg.optimize_waypoints(input, optimized) == Result::ErrorPositionalLimits);
+    CHECK_THROWS_AS(optimized.at_time(0.0, first), RuckigError);
+}
+
+TEST_CASE("later-reference-crossings-recover-zero-jerk-constant-acceleration") {
+    Ruckig<2> otg;
+    auto input = make_input<2>();
+    input.current_velocity = {-1.0, -0.75};
+    input.current_acceleration = {0.5, 0.5};
+    input.target_position = {0.0, 1.0};
+    input.target_velocity = {1.0, 1.25};
+    input.target_acceleration = {0.5, 0.5};
+    input.max_jerk = {0.0, 0.0};
+    input.min_position = {-10.0, -10.0};
+    input.max_position = {10.0, 10.0};
+    input.intermediate_positions = {{-0.9375, -0.3125}};
+    Trajectory<2> stopping, optimized;
+    CHECK(otg.calculate_waypoints(input, stopping) == Result::ErrorZeroLimits);
+    CHECK(otg.optimize_waypoints(input, optimized, 0) == Result::ErrorZeroLimits);
+    for (size_t iterations: {1, 8, 64}) {
+        REQUIRE(otg.optimize_waypoints(input, optimized, iterations) == Result::Working);
+        CHECK(optimized.get_duration() == 4.0);
+        CHECK(optimized.get_intermediate_durations() == std::vector<double>{2.5, 4.0});
+        std::array<double, 2> p, v, a;
+        optimized.at_time(2.5, p, v, a);
+        CHECK(p == input.intermediate_positions.front());
+        CHECK(v == std::array<double, 2>{0.25, 0.5});
+        CHECK(a == std::array<double, 2>{0.5, 0.5});
+        check_sampled_limits(input, optimized);
+    }
+}
+
+TEST_CASE("reference-states-can-be-regularized-without-moving-endpoints") {
+    Ruckig<2> otg;
+    for (double sign: {-1.0, 1.0}) {
+        for (auto synchronization: {Synchronization::Time, Synchronization::Phase}) {
+            auto input = make_input<2>();
+            input.current_velocity = {0.0, -sign};
+            input.target_position = {sign, 0.5 * sign};
+            input.min_position = {-10.0, -10.0};
+            input.max_position = {10.0, 10.0};
+            input.synchronization = synchronization;
+            Trajectory<2> reference, optimized;
+            REQUIRE(otg.calculate(input, reference) == Result::Working);
+            REQUIRE(reference.get_duration() == doctest::Approx(2.5));
+            std::array<double, 2> point;
+            reference.at_time(reference.get_duration() / 4.0, point);
+
+            for (bool repeated: {false, true}) {
+                input.intermediate_positions = repeated
+                    ? std::vector<std::array<double, 2>>{input.current_position, input.current_position, point, point, input.target_position, input.target_position}
+                    : std::vector<std::array<double, 2>>{point};
+                // Exact sampled states can produce a longer synchronized chain;
+                // freely chosen intermediate states can still recover the bound.
+                REQUIRE(otg.optimize_waypoints(input, optimized) == Result::Working);
+                CHECK(optimized.get_duration() == doctest::Approx(reference.get_duration()).epsilon(1e-9));
+                const auto times = optimized.get_intermediate_durations();
+                REQUIRE(times.size() == input.intermediate_positions.size() + 1);
+                if (repeated) {
+                    CHECK(times[0] == 0.0);
+                    CHECK(times[1] == 0.0);
+                    CHECK(times[2] == times[3]);
+                    CHECK(times[4] == times[5]);
+                    CHECK(times[5] == times[6]);
+                }
+                for (size_t i = 0; i < input.intermediate_positions.size(); ++i) {
+                    std::array<double, 2> p, v, a, left_p, left_v, left_a;
+                    optimized.at_time(times[i], p, v, a);
+                    optimized.at_time(std::nextafter(times[i], -std::numeric_limits<double>::infinity()), left_p, left_v, left_a);
+                    for (size_t d = 0; d < 2; ++d) {
+                        CHECK(p[d] == doctest::Approx(input.intermediate_positions[i][d]).epsilon(1e-8));
+                        CHECK(std::abs(p[d] - left_p[d]) < 1e-8);
+                        CHECK(std::abs(v[d] - left_v[d]) < 1e-8);
+                        CHECK(std::abs(a[d] - left_a[d]) < 1e-8);
+                    }
+                    if (repeated && i < 2) {
+                        CHECK(p == input.current_position);
+                        CHECK(v == input.current_velocity);
+                        CHECK(a == input.current_acceleration);
+                    }
+                }
+                std::array<double, 2> p, v, a;
+                optimized.at_time(0.0, p, v, a);
+                CHECK(p == input.current_position);
+                CHECK(v == input.current_velocity);
+                CHECK(a == input.current_acceleration);
+                optimized.at_time(optimized.get_duration(), p, v, a);
+                for (size_t d = 0; d < 2; ++d) {
+                    CHECK(p[d] == doctest::Approx(input.target_position[d]).epsilon(1e-8));
+                    CHECK(v[d] == doctest::Approx(input.target_velocity[d]).epsilon(1e-8));
+                    CHECK(a[d] == doctest::Approx(input.target_acceleration[d]).epsilon(1e-8));
+                }
+                check_sampled_limits(input, optimized);
+            }
+
+            // The point lies within this bound, but unavoidable initial braking
+            // crosses it. A regularized reference cannot bypass position checks.
+            input.intermediate_positions = {point};
+            if (sign > 0.0) {
+                input.min_position[1] = -0.47;
+            } else {
+                input.max_position[1] = 0.47;
+            }
+            CHECK(otg.optimize_waypoints(input, optimized) == Result::ErrorPositionalLimits);
+            CHECK_THROWS_AS(optimized.at_time(0.0, point), RuckigError);
+        }
+    }
+}

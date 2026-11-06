@@ -28,7 +28,7 @@ nlohmann::json CloudClient::post(const nlohmann::json& params, bool throw_error)
         return {};
     }
 
-    return nlohmann::json::parse(res->body);
+    return nlohmann::json::parse(res->body, nullptr, throw_error);
 }
 
 } // namespace ruckig

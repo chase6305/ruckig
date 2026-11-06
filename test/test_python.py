@@ -1,7 +1,7 @@
 import math
 import unittest
 
-from ruckig import InputParameter, OutputParameter, Result, Ruckig, RuckigError, Trajectory
+from ruckig import InputParameter, OutputParameter, Profile, Result, Ruckig, RuckigError, Trajectory
 
 
 class WrapperRegressionTest(unittest.TestCase):
@@ -32,6 +32,23 @@ class WrapperRegressionTest(unittest.TestCase):
         self.assertEqual(trajectory.independent_min_durations, [0.0])
         self.assertEqual(trajectory.duration, 0.0)
 
+    def test_pass_to_input_removes_all_crossed_local_waypoints(self):
+        self.input.target_position = [4.0]
+        self.input.intermediate_positions = [[1.0], [2.0], [3.0]]
+        self.input.max_velocity = self.input.max_acceleration = [2.0]
+        self.input.max_jerk = [4.0]
+        otg, output = Ruckig(1, 5.0), OutputParameter(1)
+        self.assertEqual(otg.calculate_waypoints(self.input, output.trajectory), Result.Working)
+        self.assertEqual(otg.update(output.trajectory, output), Result.Working)
+        self.assertEqual(output.new_section, 2)
+        output.pass_to_input(self.input)
+        self.assertEqual(self.input.intermediate_positions, [[3.0]])
+        output.pass_to_input(self.input)
+        self.assertEqual(self.input.intermediate_positions, [[3.0]])
+        self.assertEqual(otg.update(output.trajectory, output), Result.Finished)
+        output.pass_to_input(self.input)
+        self.assertEqual(self.input.intermediate_positions, [])
+
     def test_invalid_dimensions(self):
         self.input.current_position = []
         with self.assertRaises(RuckigError):
@@ -45,6 +62,16 @@ class WrapperRegressionTest(unittest.TestCase):
         for i, time in enumerate(times):
             self.assertEqual((positions[i], velocities[i], accelerations[i]), trajectory.at_time(time))
         self.assertEqual(trajectory.at_times([]), ([], [], []))
+
+    def test_profile_metadata_enums(self):
+        otg, trajectory = Ruckig(1), Trajectory(1)
+        for target, direction in ((1.0, Profile.Direction.UP), (-1.0, Profile.Direction.DOWN)):
+            self.input.target_position = [target]
+            self.assertEqual(otg.calculate(self.input, trajectory), Result.Working)
+            profile = trajectory.profiles[0][0]
+            self.assertEqual(profile.direction, direction)
+            self.assertIsInstance(profile.limits, Profile.ReachedLimits)
+            self.assertIsInstance(profile.control_signs, Profile.ControlSigns)
 
     def test_position_bounds(self):
         trajectory = Trajectory(1)
@@ -146,6 +173,16 @@ class WrapperRegressionTest(unittest.TestCase):
         self.input.intermediate_positions = [[3000.0], [6000.0]]
         self.assertEqual(Ruckig(1).calculate_waypoints(self.input, Trajectory(1)), Result.ErrorTrajectoryDuration)
 
+
+class LocalPlanningRegressionTest(unittest.TestCase):
+    def setUp(self):
+        self.input = InputParameter(1)
+        self.input.current_position = [0.0]
+        self.input.target_position = [1.0]
+        self.input.max_velocity = [1.0]
+        self.input.max_acceleration = [1.0]
+        self.input.max_jerk = [1.0]
+
     def test_automatic_waypoint_states(self):
         otg = Ruckig(1, 0.1)
         self.input.max_velocity = [2.0]
@@ -168,6 +205,33 @@ class WrapperRegressionTest(unittest.TestCase):
             otg.optimize_waypoints(self.input, optimized, max_iterations=65)
         with self.assertRaises(RuckigError):
             otg.update(optimized, OutputParameter(1))
+
+    def test_zero_jerk_reference_recovers_after_failed_stopping_baseline(self):
+        velocity, acceleration = [-0.525, 0.275], [0.5, -0.25]
+        inp, trajectory, otg = InputParameter(2), Trajectory(2), Ruckig(2)
+        inp.current_position = [0.0, 0.0]
+        inp.current_velocity, inp.current_acceleration = velocity, acceleration
+        inp.target_position = [2.0 * v + 2.0 * a for v, a in zip(velocity, acceleration)]
+        inp.target_velocity = [v + 2.0 * a for v, a in zip(velocity, acceleration)]
+        inp.target_acceleration = acceleration
+        inp.max_velocity = inp.max_acceleration = [1.0, 1.0]
+        inp.max_jerk = [0.0, 0.0]
+        self.assertEqual(otg.calculate(inp, trajectory), Result.Working)
+        inp.intermediate_positions = [
+            [v * t + a * t * t / 2.0 for v, a in zip(velocity, acceleration)]
+            for t in (0.5, 1.0)
+        ]
+        self.assertEqual(otg.optimize_waypoints(inp, trajectory, max_iterations=0), Result.ErrorZeroLimits)
+        with self.assertRaises(RuckigError):
+            trajectory.at_time(0.0)
+        self.assertEqual(otg.optimize_waypoints(inp, trajectory), Result.Working)
+        self.assertAlmostEqual(trajectory.duration, 2.0, places=12)
+        for time in (0.0, 0.125, 0.5, 1.0, 1.05, 1.1, 1.5, 2.0):
+            positions, velocities, accelerations = trajectory.at_time(time)
+            for axis, (v, a) in enumerate(zip(velocity, acceleration)):
+                self.assertAlmostEqual(positions[axis], v * time + a * time * time / 2.0, places=12)
+                self.assertAlmostEqual(velocities[axis], v + a * time, places=12)
+                self.assertAlmostEqual(accelerations[axis], a, places=12)
 
     def test_automatic_search_can_reject_trials_without_throwing(self):
         otg = Ruckig(1)
@@ -212,6 +276,50 @@ class WrapperRegressionTest(unittest.TestCase):
         self.assertGreater(v[0], 1.0)
         self.assertGreater(a[0], 0.1)
 
+    def test_local_per_section_timing_scalar_oracle(self):
+        self.input.target_position = [0.0]
+        self.input.intermediate_positions = [[0.0], [0.0]]
+        minima = [0.01, 0.02, 0.0]
+        self.input.per_section_minimum_duration = minima
+        trajectory = Trajectory(1)
+        self.assertEqual(Ruckig(1).calculate_waypoints(self.input, trajectory), Result.Working)
+        prefix = 0.0
+        for index, minimum in enumerate(minima):
+            scalar = InputParameter(1)
+            scalar.target_position = [0.0]
+            scalar.max_velocity = scalar.max_acceleration = scalar.max_jerk = [1.0]
+            scalar.minimum_duration = minimum
+            oracle = Trajectory(1)
+            self.assertEqual(Ruckig(1).calculate(scalar, oracle), Result.Working)
+            self.assertGreaterEqual(oracle.duration, minimum)
+            prefix += oracle.duration
+            self.assertEqual(trajectory.intermediate_durations[index], prefix)
+        times = trajectory.intermediate_durations
+        self.assertEqual(times[1] - times[0], math.nextafter(0.02, 0.0))
+
+    def test_automatic_per_section_timing_and_validation(self):
+        self.input.target_position = [3.0]
+        self.input.intermediate_positions = [[1.0], [1.0], [2.0]]
+        self.input.per_section_minimum_duration = [0.0, 3.0, 0.0, 0.5]
+        trajectory = Trajectory(1)
+        otg = Ruckig(1)
+        self.assertEqual(otg.optimize_waypoints(self.input, trajectory), Result.Working)
+        times = trajectory.intermediate_durations
+        self.assertEqual(len(times), 4)
+        self.assertGreater(times[1], times[0])
+        for point, time in zip(self.input.intermediate_positions, times):
+            self.assertAlmostEqual(trajectory.at_time(time)[0][0], point[0])
+        self.input.per_section_minimum_duration = [0.0, float('nan'), 0.0, 0.0]
+        with self.assertRaises(RuckigError):
+            otg.optimize_waypoints(self.input, trajectory)
+        with self.assertRaises(RuckigError):
+            trajectory.at_time(0.0)
+        self.input.intermediate_positions = []
+        self.input.per_section_minimum_duration = [4.0]
+        self.input.minimum_duration = 5.0
+        self.assertEqual(otg.calculate_waypoints(self.input, trajectory), Result.Working)
+        self.assertEqual(trajectory.duration, 5.0)
+
     def test_sampling_rejects_invalid_state_and_time(self):
         trajectory = Trajectory(1)
         self.assertEqual(trajectory.duration, 0.0)
@@ -232,6 +340,35 @@ class WrapperRegressionTest(unittest.TestCase):
         self.assertEqual(otg.calculate(self.input, trajectory), Result.ErrorPositionalLimits)
         with self.assertRaises(RuckigError):
             trajectory.at_time(0.0)
+
+    def test_local_position_query_windows(self):
+        otg, trajectory = Ruckig(1), Trajectory(1)
+        prefix = 2.0 ** -53
+        after = math.nextafter(1.0, math.inf)
+        for speed, should_match in ((1.0, True), (2.0 ** 23, False)):
+            inp = InputParameter(1)
+            inp.current_position = [-speed * prefix]
+            inp.target_position = [2.0 * speed]
+            inp.current_velocity = inp.target_velocity = [speed]
+            inp.max_velocity = [2.0 * speed]
+            inp.max_acceleration = [2.0]
+            inp.max_jerk = [0.0]
+            inp.intermediate_positions = [[0.0], [speed]]
+            self.assertEqual(otg.calculate_waypoints(inp, trajectory, [[speed], [speed]], [[0.0], [0.0]]), Result.Working)
+            self.assertEqual(trajectory.intermediate_durations, [prefix, 1.0, 2.0])
+            crossing = trajectory.get_first_time_at_position(0, speed, after)
+            if should_match:
+                self.assertEqual(crossing, after)
+            else:
+                self.assertIsNone(crossing)
+
+        self.input.target_position = [3.0]
+        self.input.intermediate_positions = [[1.0], [2.0]]
+        self.assertEqual(otg.calculate_waypoints(self.input, trajectory), Result.Working)
+        duration = trajectory.duration
+        position = trajectory.at_time(duration)[0][0]
+        self.assertEqual(trajectory.get_first_time_at_position(0, position, duration), duration)
+        self.assertIsNone(trajectory.get_first_time_at_position(0, position, math.nextafter(duration, math.inf)))
 
     def test_dense_curved_waypoints(self):
         inp = InputParameter(2)

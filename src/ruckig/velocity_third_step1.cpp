@@ -92,6 +92,8 @@ bool VelocityThirdOrderStep1::time_all_single_step(Profile* profile, double aMax
 
 
 bool VelocityThirdOrderStep1::get_profile(const Profile& input, Block& block) {
+    valid_profiles_overflow = false;
+
     // Zero-limits special case
     if (_jMax == 0.0) {
         auto& p = block.p_min;
@@ -134,6 +136,10 @@ bool VelocityThirdOrderStep1::get_profile(const Profile& input, Block& block) {
     }
 
 return_block:
+    if (valid_profiles_overflow) {
+        return false;
+    }
+
     return Block::calculate_block(block, valid_profiles, std::distance(start, profile));
 }
 

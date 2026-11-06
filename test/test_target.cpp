@@ -568,6 +568,93 @@ TEST_CASE("offline-trajectory-execution") {
     CHECK(fresh_output.new_calculation);
 }
 
+TEST_CASE("pass-to-input-keeps-only-unpassed-waypoints") {
+    Ruckig<1> otg;
+    InputParameter<1> input;
+    input.current_position = {0.0};
+    input.target_position = {4.0};
+    input.intermediate_positions = {{1.0}, {2.0}, {3.0}};
+    input.max_velocity = input.max_acceleration = {2.0};
+    input.max_jerk = {4.0};
+    const auto original = input;
+    OutputParameter<1> output;
+    REQUIRE(otg.calculate_waypoints(input, output.trajectory) == Result::Working);
+    const auto sample = [&](double time, bool new_calculation) {
+        const size_t previous = output.new_section;
+        output.trajectory.at_time(time, output.new_position, output.new_velocity,
+            output.new_acceleration, output.new_jerk, output.new_section);
+        output.new_calculation = new_calculation;
+        output.did_section_change = output.new_section > previous;
+        output.time = time;
+    };
+    sample(5.0, true);
+    REQUIRE(output.new_section == 2);
+    output.pass_to_input(input);
+    CHECK(input.intermediate_positions == std::vector<std::array<double, 1>>{{3.0}});
+    CHECK(input.current_position == output.new_position);
+    output.pass_to_input(input);
+    CHECK(input.intermediate_positions == std::vector<std::array<double, 1>>{{3.0}});
+    sample(8.0, false);
+    output.pass_to_input(input);
+    CHECK(input.intermediate_positions.empty());
+
+    input = original;
+    output.new_section = 0;
+    for (double time: {1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 8.0}) {
+        sample(time, false);
+        output.pass_to_input(input);
+        CHECK(input.intermediate_positions.size() == 3 - std::min<size_t>(output.new_section, 3));
+    }
+
+    // The previous trajectory ended in section 4. A new calculation can pass
+    // zero-duration sections while its section index is lower than before.
+    input = original;
+    input.target_position = {3.0};
+    input.intermediate_positions = {{0.0}, {0.0}, {1.0}, {2.0}};
+    REQUIRE(otg.calculate_waypoints(input, output.trajectory) == Result::Working);
+    sample(0.01, true);
+    REQUIRE(output.new_section == 2);
+    REQUIRE_FALSE(output.did_section_change);
+    output.pass_to_input(input);
+    CHECK(input.intermediate_positions == std::vector<std::array<double, 1>>{{1.0}, {2.0}});
+    output.pass_to_input(input);
+    CHECK(input.intermediate_positions == std::vector<std::array<double, 1>>{{1.0}, {2.0}});
+
+    input = original;
+    input.target_position = {0.0};
+    input.intermediate_positions = {{0.0}, {0.0}};
+    REQUIRE(otg.calculate_waypoints(input, output.trajectory) == Result::Working);
+    sample(0.0, true);
+    output.pass_to_input(input);
+    CHECK(input.intermediate_positions.empty());
+
+    // Equal positions with different prescribed states are distinct visits.
+    input = original;
+    input.intermediate_positions = {{1.0}, {1.0}, {2.0}};
+    REQUIRE(otg.calculate_waypoints(input, output.trajectory, {{0.5}, {-0.5}, {0.0}}) == Result::Working);
+    const auto visits = output.trajectory.get_intermediate_durations();
+    REQUIRE(visits[1] > visits[0]);
+    sample(visits[0], true);
+    output.pass_to_input(input);
+    CHECK(input.intermediate_positions == std::vector<std::array<double, 1>>{{1.0}, {2.0}});
+    sample((visits[0] + visits[1]) / 2.0, false);
+    output.pass_to_input(input);
+    CHECK(input.intermediate_positions == std::vector<std::array<double, 1>>{{1.0}, {2.0}});
+    sample(visits[1], false);
+    output.pass_to_input(input);
+    CHECK(input.intermediate_positions == std::vector<std::array<double, 1>>{{2.0}});
+
+    // Preserve the helper's existing behavior for manually supplied states
+    // that have no successfully calculated trajectory.
+    input = original;
+    OutputParameter<1> manual;
+    manual.new_position = {0.5};
+    manual.new_velocity = manual.new_acceleration = {0.0};
+    manual.did_section_change = true;
+    manual.pass_to_input(input);
+    CHECK(input.intermediate_positions == std::vector<std::array<double, 1>>{{2.0}, {3.0}});
+}
+
 TEST_CASE("input-validation") {
     RuckigThrow<DynamicDOFs> ruckig {2};
     InputParameter input {2};
@@ -1608,4 +1695,65 @@ TEST_CASE("two-jerk-short-profile-duplicates-retain-blocked-gap") {
     CHECK(std::abs(p - input.target_position[0]) < 1e-8);
     CHECK(std::abs(v - input.target_velocity[0]) < 1e-8);
     CHECK(std::abs(a - input.target_acceleration[0]) < 1e-10);
+}
+
+namespace ruckig {
+struct ProfileCapacityTestAccess {
+    template<class Step>
+    static void check_capacity_and_reset(Step& step, const Profile& input, double duration) {
+        const auto start = step.valid_profiles.begin();
+        const size_t capacity = step.valid_profiles.size() - 1;
+        auto profile = start;
+
+        // Submit initialized candidates directly; no numerical failure input.
+        for (size_t accepted = 1; accepted <= capacity; ++accepted) {
+            *profile = input;
+            profile->t[0] = static_cast<double>(accepted);
+            step.add_profile(profile);
+            REQUIRE(profile == start + accepted);
+            CHECK_FALSE(step.valid_profiles_overflow);
+            CHECK(profile->p[0] == input.p[0]);
+            CHECK(profile->pf == input.pf);
+        }
+
+        const auto probing = profile;
+        for (size_t attempt = 0; attempt < 4; ++attempt) {
+            *profile = input;
+            step.add_profile(profile);
+            REQUIRE(profile == probing);
+            CHECK(step.valid_profiles_overflow);
+            for (size_t saved = 0; saved < capacity; ++saved) {
+                CHECK(start[saved].t[0] == static_cast<double>(saved + 1));
+                CHECK(start[saved].p[0] == input.p[0]);
+                CHECK(start[saved].pf == input.pf);
+            }
+        }
+
+        Block block;
+        REQUIRE(step.get_profile(input, block));
+        CHECK_FALSE(step.valid_profiles_overflow);
+        CHECK(block.t_min == doctest::Approx(duration));
+        CHECK(block.p_min.p[0] == input.p[0]);
+        CHECK(block.p_min.p.back() == doctest::Approx(input.pf));
+    }
+};
+} // namespace ruckig
+
+TEST_CASE("step1-candidate-capacity") {
+    Profile input {};
+    input.set_boundary(2.0, 0.0, 0.0, 3.0, 0.0, 0.0);
+    SUBCASE("third-order-position") {
+        PositionThirdOrderStep1 step {2.0, 0.0, 0.0, 3.0, 0.0, 0.0,
+            1.0, -1.0, 1.0, -1.0, 1.0};
+        ProfileCapacityTestAccess::check_capacity_and_reset(step, input, 4 * std::cbrt(0.5));
+    }
+    SUBCASE("second-order-position") {
+        PositionSecondOrderStep1 step {2.0, 0.0, 3.0, 0.0, 1.0, -1.0, 1.0, -1.0};
+        ProfileCapacityTestAccess::check_capacity_and_reset(step, input, 2.0);
+    }
+    SUBCASE("third-order-velocity") {
+        input.vf = 1.0;
+        VelocityThirdOrderStep1 step {0.0, 0.0, 1.0, 0.0, 1.0, -1.0, 1.0};
+        ProfileCapacityTestAccess::check_capacity_and_reset(step, input, 2.0);
+    }
 }

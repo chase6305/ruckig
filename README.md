@@ -23,6 +23,8 @@ Ruckig generates trajectories on-the-fly, allowing robots and machines to react 
 
 More information can be found at [ruckig.com](https://ruckig.com) and in the corresponding paper [Jerk-limited Real-time Trajectory Generation with Arbitrary Target States](https://arxiv.org/abs/2105.04830). Documentation is published at [docs.ruckig.com](https://docs.ruckig.com).
 
+This fork adds [fully local multi-waypoint planning and replay](#fully-local-multi-waypoint-calculation), including automatic intermediate-state selection, and [local position-bound checks](#local-position-bounds). The sections below describe these APIs and their supported inputs.
+
 
 ## Installation
 
@@ -42,13 +44,19 @@ cpack
 sudo dpkg -i ruckig*.deb
 ```
 
-An example of using Ruckig in your CMake project is given by `examples/CMakeLists.txt`. However, you can also include Ruckig as a directory within your project and call `add_subdirectory(ruckig)` in your parent `CMakeLists.txt`.
+See the [installed-library example](examples/CMakeLists-installed.txt) for `find_package`, or the [directory-layout example](examples/CMakeLists-directory.txt) for known include/library directories. To embed the source in your project, call `add_subdirectory(ruckig)` in your parent `CMakeLists.txt`.
+
+When updating this fork, rebuild the C++ library and dependent applications together.
 
 Ruckig is also available as a Python module, in particular for development or debugging purposes. The Ruckig *Community Version* can be installed from [PyPI](https://pypi.org/project/ruckig/) via
 ```bash
 pip install ruckig
 ```
+To use this fork's added local APIs in Python, install from the root of this checkout with `python -m pip install .`. A build without the cloud client uses `python -m pip install . --config-settings=cmake.define.BUILD_CLOUD_CLIENT=OFF`.
+
 When using CMake, the Python module can be built using the `BUILD_PYTHON_MODULE` flag. If you're only interested in the Python module (and not in the C++ library), you can build and install Ruckig via `pip install .`.
+
+Rust applications can select this checkout with a Cargo path dependency, for example `ruckig = { path = "../ruckig" }` under `[dependencies]` in `Cargo.toml`; adjust the path to this repository.
 
 
 ## Tutorial
@@ -222,15 +230,25 @@ fn main() {
 
 C++/Python replay uses `update(output.trajectory, output)` to avoid copying the chain every cycle. Rust's `update_trajectory` loads the chain and advances the first cycle; `update_current_trajectory` reuses it and the state buffers thereafter. No `pass_to_input` is needed. Replay clamps to the terminal state, including nonzero target velocity/acceleration. Use a fresh output object for each new replay (or reset `time` and `new_section` first in C++). See [the C++ example](examples/17_local_waypoints.cpp), [Python example](examples/17_local_waypoints.py), and [Rust example](examples/17_local_waypoints.rs) for all three modes.
 
-**Supported inputs and results.** Local chains require position control, all axes enabled, finite states and jerk limits, and global time or phase synchronization. Global kinematic and position limits are checked on each segment. Global minimum/discrete duration, per-section limits/durations, per-axis control/synchronization overrides, and calculation interruption are unsupported and rejected. Planning allocates memory and belongs outside the real-time control loop.
+For repeated time sampling, Rust's `Trajectory` and `TrajectoryRef` also provide `at_time_into(time, &mut positions, &mut velocities, &mut accelerations)`. Preallocate one buffer of exactly the trajectory's DoF count for each output; valid calls reuse them without allocating. C++ callers can pass mutable `std::span<double>` buffers to the three-output `at_time` overload. These methods retain ordinary sampling and extrapolation semantics.
 
-Check for `Result::Working` / `Result.Working` before sampling or replay; validation can also throw `RuckigError` in Python or C++'s throwing configuration. Failed calculation leaves the output trajectory invalid. C++/Python expose ordinary/batch time sampling, section indices, position extrema and position-crossing queries over the full chain. Their `intermediate_durations` contains every section end, including the final duration (`get_intermediate_durations()` in C++); sample these times to inspect chosen waypoint states. `independent_min_durations` sums the per-axis minimum durations across sections. Rust exposes `get_duration()`, `at_time()` and replay section indices. Sampling needs a valid trajectory and finite times; invalid sampling raises `RuckigError` in C++/Python and panics in Rust. Finite sampling times outside the timeline retain the existing extrapolation behavior.
+**Supported inputs and results.** Local chains require position control, all axes enabled, finite states and jerk limits, and global time or phase synchronization. Global kinematic and position limits are checked on each segment. Global minimum/discrete duration for multi-waypoint chains, per-section kinematic/position limits, per-axis control/synchronization overrides, and calculation interruption are unsupported and rejected. Planning allocates memory and belongs outside the real-time control loop.
 
-**Dense points, duplicates and planning cost.** The automatic method tries stopping, endpoint-motion and geometry-based seeds, then refines feasible states by re-solving adjacent segments. Endpoint-motion seeds can preserve cruise speed on dense straight routes; curved routes use chord lengths, tangents and curvature as additional timing hints. If a reversing reference coordinate has an ambiguous crossing, another axis can identify the waypoint times; this fallback accepts only a feasible chain that reaches the endpoint-duration bound. Only a strictly shorter feasible candidate replaces the current solution, so a feasible stopping baseline never gets worse. Local refinement uses zero velocity at reversing coordinates; inspect returned states rather than assuming nonzero speed at every point. Consecutive identical positions share one optimized state but keep separate section entries at the same time. Redundant leading/trailing points can also reuse the prescribed current/target state, retaining zero-duration section entries. With prescribed states, only identical position/velocity/acceleration states share a time; equal positions with different states require a transition.
+C++ and Python local APIs accept `per_section_minimum_duration`: one finite nonnegative lower bound per original interval, including the final interval. For the two-waypoint example, set `inp.per_section_minimum_duration = [1.0, 0.5, 1.0]` in Python, or `input.per_section_minimum_duration = std::vector<double>{1.0, 0.5, 1.0};` in C++, before calling either local planning method. Automatic state selection preserves these bounds and all original intervals, including repeated positions. With no intermediate points, the single entry and any global `minimum_duration` combine by taking the larger value. The Rust wrapper does not expose this field.
 
-`max_iterations` defaults to 8 in C++/Python, accepts 0 through 64, and bounds refinement sweeps per seed. Rust requires this argument explicitly. Zero calculates only the stopping baseline. More sweeps can increase planning cost, and up to two seeds are refined. The bounded heuristic can miss a feasible solution and does not prove infeasibility or global time optimality. Fixed-state `calculate_waypoints` avoids this search; neither local API guarantees the globally shortest multi-waypoint trajectory. Position, velocity and acceleration match at joins within solver tolerances; jerk may jump within its limits. Passing through joint-space points does not guarantee following the original geometric path or avoiding obstacles.
+Timing uses the single-segment solver's floating-point accuracy; subtracting cumulative section timestamps can incur roundoff. A positive interval minimum that cannot advance the cumulative timestamp returns `ErrorTrajectoryDuration`. Rebuild the duration list when filtering or editing waypoints; replanning does not automatically subtract time already spent in an interval.
 
-Reduce unnecessary waypoint density when the application permits geometric deviation. `filter_intermediate_positions(input, threshold_distance)` is fully local in C++/Python in both cloud configurations. It requires one finite nonnegative threshold per DoF and checks all axes, including coordinates equal at the candidate segment's endpoints. One-axis filtering processes the list in linear time using its running position extrema. Filtering changes the point list, so apply it only when every original point need not be visited:
+Local refinement is skipped when a feasible seed reaches the sum of the interval minima, since no shorter total duration can satisfy those bounds.
+
+Check for `Result::Working` / `Result.Working` before sampling or replay; validation can also throw `RuckigError` in Python or C++'s throwing configuration. Failed calculation leaves the output trajectory invalid. C++/Python expose ordinary/batch time sampling, section indices, position extrema and position-crossing queries over the full chain. Python profile metadata uses the nested `Profile.ReachedLimits`, `Profile.Direction` and `Profile.ControlSigns` enums. The trajectory's `intermediate_durations` contains every section end, including the final duration (`get_intermediate_durations()` in C++); sample these times to inspect chosen waypoint states. `independent_min_durations` sums the per-axis minimum durations across sections. Rust exposes `get_duration()`, `at_time()` and replay section indices. Sampling needs a valid trajectory and finite times; invalid sampling raises `RuckigError` in C++/Python and panics in Rust. Finite sampling times outside the timeline retain the existing extrapolation behavior.
+
+In C++/Python, `get_first_time_at_position(dof, position, time_after=0.0)` returns a matching time within `[max(0, time_after), duration]`, or no result (`std::nullopt` / `None`). A lower bound after the trajectory end returns no result, even for the terminal position. If floating-point addition puts a candidate just outside this window, the query accepts a clamped boundary time only when sampling there matches the requested position within the existing `1e-9` tolerance. Phases that end before the lower bound skip polynomial root solving; long chains queried near their end benefit most. This is a time-window guarantee, not an additional validation of cloud motion profiles.
+
+**Dense points, duplicates and planning cost.** The automatic method tries stopping, endpoint-motion and geometry-based seeds, then refines feasible states by re-solving adjacent segments. Endpoint-motion seeds can preserve cruise speed on dense straight routes; curved routes use chord lengths, tangents and curvature as additional timing hints. If a reversing reference coordinate has an ambiguous crossing, the optimizer can try another axis and later phase roots. When no feasible chain has been found, it can also retry another coordinate after a segment re-solve fails. When matched reference states produce a numerically degenerate section, it can also try up to three tiny relative adjustments of freely chosen intermediate velocities and accelerations. Positions, prescribed endpoint states and all original limits stay fixed. It verifies every coordinate and the complete re-solved chain before accepting such a fallback at the endpoint-duration bound. Only a strictly shorter feasible candidate replaces the current solution, so a feasible stopping baseline never gets worse. Local refinement uses zero velocity at reversing coordinates; inspect returned states rather than assuming nonzero speed at every point. Without positive per-section minima, consecutive identical positions share one optimized state but keep separate section entries at the same time. Redundant leading/trailing points can also reuse the prescribed current/target state, retaining zero-duration section entries when their minima are absent or zero. With prescribed states, only identical position/velocity/acceleration states share a time; equal positions with different states require a transition.
+
+`max_iterations` defaults to 8 in C++/Python, accepts 0 through 64, and bounds refinement sweeps per seed. Rust requires this argument explicitly. Zero calculates only the stopping baseline. With zero jerk limits, a feasible route may need nonzero intermediate velocity or acceleration; automatic state selection can recover such motion when the stopping baseline fails. On this recovery path, identical crossing-time vectors that already failed reconstruction are skipped within the same reference pass; distinct times are still tried. More sweeps can increase planning cost, and up to two seeds are refined. The iteration limit does not cap reference-coordinate or phase-root attempts, whose cost also grows with axis and waypoint counts. The bounded heuristic can miss a feasible solution and does not prove infeasibility or global time optimality. Fixed-state `calculate_waypoints` avoids this search; neither local API guarantees the globally shortest multi-waypoint trajectory. Position, velocity and acceleration match at joins within solver tolerances; jerk may jump within its limits. Passing through joint-space points does not guarantee following the original geometric path or avoiding obstacles.
+
+Reduce unnecessary waypoint density when the application permits geometric deviation. `filter_intermediate_positions(input, threshold_distance)` is fully local in C++/Python in both cloud configurations. It requires one finite nonnegative threshold per DoF and checks all axes, including coordinates equal at the candidate segment's endpoints. Windows whose interior points vary along only one coordinate use running extrema, including multi-axis paths with stationary coordinates; fully one-coordinate routes are processed in linear time. Filtering changes the point list, so apply it only when every original point need not be visited:
 
 ```python
 inp.intermediate_positions = otg.filter_intermediate_positions(inp, [0.01, 0.01])
@@ -264,7 +282,11 @@ python test/benchmark_waypoints.py
 
 The waypoint benchmark reports stopping and automatic trajectory durations in seconds and median automatic planning time in microseconds, including Python call overhead. It uses fixed straight, dense, curved, reversing and repeated-point cases, excludes one warm-up, and measures 11 calls with the default 8 sweeps. To compare revisions, use the same Release build settings, machine, compiler and Python version, and record the revision and cloud setting. Planning time and trajectory duration measure different tradeoffs; timings are not real-time guarantees. `BUILD_BENCHMARK` builds the separate state-to-state C++ benchmark and is not needed for this script.
 
-The `endpoint-2d` case includes repeated boundary positions with nonzero endpoint velocities. A second table reports one-axis filtering time for 1,000, 5,000 and 10,000 monotone intermediate points, including Python call overhead.
+The `endpoint-2d` case includes repeated boundary positions with nonzero endpoint velocities, while `reference-both-2d` exercises repeated crossings on both axes. The `reference-state-2d` case checks recovery of a 2.5-second reference motion when exact sampled intermediate states produce a longer chain. A second table reports filtering time for monotone one-coordinate runs in one- and six-axis inputs, including Python call overhead.
+
+A third table measures early queries and the same near-end positions with `time_after=0` and `time_after=T-0.25` on local constant-speed chains of 100, 1,000 and 10,000 sections. It reports median time per query from 11 batches of 128 calls after one warm-up batch, including Python call overhead; construction and correctness checks stay outside timing.
+
+A final table measures failed reference recovery with 32 waypoints and 2, 12 or 32 axes. These zero-jerk inputs pass validation, but their constant-acceleration motion violates a position bound; the expected return is `ErrorZeroLimits`.
 
 ```bash
 cargo test --locked
@@ -272,6 +294,8 @@ cargo run --locked --release --example 17_local_waypoints
 ```
 
 The Cargo build currently includes the cloud client unconditionally and has no cloud-disable feature. The explicit local methods and offline replay above still make no cloud calls.
+
+For explicit local chains, `pass_to_input` also removes every waypoint reached by the output time, including when one cycle crosses several sections. Repeating the call with the same output keeps the remaining list unchanged. Apply it before editing the next target or waypoint list. Before replanning, trim any caller-owned waypoint velocity/acceleration arrays to match the remaining points and rebuild `per_section_minimum_duration` for the remaining intervals. Ordinary cloud outputs retain their existing waypoint-removal behavior.
 
 ### Input Parameter
 
@@ -302,6 +326,7 @@ std::optional<Vector> min_acceleration; // If not given, the negative maximum ac
 
 std::array<bool, DOFs> enabled; // Initialized to true
 std::optional<double> minimum_duration;
+std::optional<std::vector<double>> per_section_minimum_duration; // Local C++/Python chains: one minimum per original interval
 std::optional<double> interrupt_calculation_duration; // [µs], (only in Pro Version)
 
 ControlInterface control_interface; // The default position interface controls the full kinematic state.
@@ -314,7 +339,7 @@ std::optional<Vector<Synchronization>> per_dof_synchronization; // Sets the sync
 
 On top of the current state, target state, and constraints, Ruckig allows for a few more advanced settings:
 - A *minimum* velocity and acceleration can be specified - these should be a negative number. If they are not given, the negative maximum velocity or acceleration will be used (similar to the jerk limit). For example, this might be useful in human robot collaboration settings with a different velocity limit towards a human. Or, when switching between different moving coordinate frames like picking from a conveyer belt.
-- You can overwrite the global kinematic limits to specify limits for each section between two waypoints separately by using e.g. `per_section_max_velocity`.
+- The ordinary cloud path sends per-section kinematic limits such as `per_section_max_velocity`. Explicit local chains reject per-section kinematic/position limits; local C++/Python chains support `per_section_minimum_duration` as described above.
 - If a DoF is not *enabled*, it will be ignored in the calculation. Ruckig will output a trajectory with constant acceleration for those DoFs.
 - A *minimum duration* can be optionally given. Note that Ruckig can not guarantee an exact, but only a minimum duration of the trajectory.
 - The control interface (position or velocity control) can be switched easily. For example, a stop trajectory or visual servoing can be easily implemented with the velocity interface.
@@ -350,8 +375,13 @@ Error                           | -1
 ErrorInvalidInput               | -100
 ErrorTrajectoryDuration         | -101
 ErrorPositionalLimits           | -102
+ErrorZeroLimits                 | -104
 ErrorExecutionTimeCalculation   | -110
 ErrorSynchronizationCalculation | -111
+
+With the default C++ `Ruckig` configuration, cloud connection failures, non-200 HTTP responses, and JSON parsing failures return `Result::Error`. `RuckigThrow` and Python continue to report these failures with exceptions.
+
+Malformed cloud trajectory data follows the same error/exception policy and leaves no usable trajectory. Responses must have consistent section dimensions and profile array lengths. Section and phase end times must be finite, nonnegative, and ordered; the final section end must equal the reported duration. Filtered or merged responses may contain fewer sections than the requested waypoint chain. These checks validate the response structure for sampling; they do not repeat the server's kinematic optimization.
 
 
 ### Output Parameter
@@ -382,6 +412,8 @@ std::array<double, DOFs> independent_min_durations; // Time-optimal profile for 
 <...> at_time(double time); // Get the kinematic state of the trajectory at a given time
 void get_position_extrema(Vector<Bound>& position_extrema); // Passes information about the position extrema and their times
 ```
+Independent minimum durations are available for state-to-state and explicit local waypoint calculations. The cloud path does not populate this diagnostic; its C++/Python getter raises `RuckigError` for a cloud trajectory. Use local calculation when these values are required.
+
 Again, we refer to the [API documentation](https://docs.ruckig.com) for the exact signatures.
 
 
@@ -417,6 +449,8 @@ This is a feasibility check of the generated motion: it does not search for a di
 
 ### Tracking Interface
 
+**Ruckig Pro only.** The `Trackig` examples below are upstream Pro documentation; this fork does not implement the tracking interface.
+
 When following an arbitrary signal with position, velocity, acceleration, and jerk-limitation, the straightforward way would be to pass the current state to Ruckig's target state. However, as the resulting trajectory will take time to catch up, this approach will always lag behind the signal. The tracking interface solves this problem by predicting ahead (e.g. with constant acceleration by default) and is therefore able to follow signals very closely in a time-optimal way. This might be very helpful for (general) tracking, robot servoing, or trajectory post-processing applications.
 
 To use the tracking interface, construct
@@ -446,14 +480,14 @@ Please find a complete example [here](https://github.com/pantor/ruckig/blob/main
 ```.cpp
 smooth_trajectory = trackig.calculate_trajectory(target_states, input);
 ```
-method with the trajectory given as a `std::vector` of target states. The Tracking interface is available in the Ruckig Pro version.
+method with the trajectory given as a `std::vector` of target states.
 
 
 ## Tests and Numerical Stability
 
-The current test suite validates over 5.000.000.000 random trajectories as well as many additional edge cases. The numerical exactness is tested for the final position and final velocity to be within `1e-8`, for the final acceleration to be within `1e-10`, and for the velocity, acceleration and jerk limit to be within a numerical error of `1e-12`. These are absolute values - we suggest to scale your input so that these correspond to your required precision of the system. For example, for most real-world systems we suggest to use input values in `[m]` (instead of e.g. `[mm]`), as `1e-8m` is sufficiently precise for practical trajectory generation. Furthermore, all kinematic limits should be below `1e9`. The maximal supported trajectory duration is `7e3`. Note that Ruckig will also output values outside of this range, there is however no guarantee for correctness.
+Linux CI runs `./build/test-target 5000000` for randomized state-to-state testing alongside the repository's regression suites. The numerical exactness is tested for the final position and final velocity to be within `1e-8`, for the final acceleration to be within `1e-10`, and for the velocity, acceleration and jerk limit to be within a numerical error of `1e-12`. These are absolute values - we suggest to scale your input so that these correspond to your required precision of the system. For example, for most real-world systems we suggest to use input values in `[m]` (instead of e.g. `[mm]`), as `1e-8m` is sufficiently precise for practical trajectory generation. Furthermore, all kinematic limits should be below `1e9`. The maximal supported trajectory duration is `7e3`. Note that Ruckig will also output values outside of this range, there is however no guarantee for correctness.
 
-The Ruckig Pro version has additional tools to increase the numerical range and improve reliability. For example, the `position_scale` and `time_scale` parameter of the `Calculator` class change the internal representation of the input parameters.
+The following `Calculator::position_scale` and `Calculator::time_scale` example is retained as a Pro-only reference; these fields are not implemented in this fork.
 ```.cpp
 Ruckig ruckig {1};  // Works also for Trackig
 
@@ -465,7 +499,7 @@ This way, you can easily achieve the requirements above even for very high jerk 
 
 ## Benchmark
 
-We report [benchmarking results in our docs](https://docs.ruckig.com/benchmark.html). To the best of our knowledge, the Ruckig Community version is the fastest trajectory or s-curve generator for state-to-state motions and is well-suited for control cycles down to 500 microseconds (2000 Hz). The Pro version is around twice as fast, making it even better suited for short control cycles or less powerful hardware.
+Upstream [state-to-state benchmark results](https://docs.ruckig.com/benchmark.html) describe a different workload from this fork's local waypoint search. For local planning, filtering, position queries and failed-reference recovery, use the [repository benchmark instructions](#fully-local-multi-waypoint-calculation) above and record the build settings and revision when comparing results.
 
 
 ## Development
