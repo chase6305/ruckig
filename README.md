@@ -44,7 +44,7 @@ cpack
 sudo dpkg -i ruckig*.deb
 ```
 
-An example of using Ruckig in your CMake project is given by `examples/CMakeLists.txt`. However, you can also include Ruckig as a directory within your project and call `add_subdirectory(ruckig)` in your parent `CMakeLists.txt`.
+See the [installed-library example](examples/CMakeLists-installed.txt) for `find_package`, or the [directory-layout example](examples/CMakeLists-directory.txt) for known include/library directories. To embed the source in your project, call `add_subdirectory(ruckig)` in your parent `CMakeLists.txt`.
 
 When updating this fork, rebuild the C++ library and dependent applications together.
 
@@ -55,6 +55,8 @@ pip install ruckig
 To use this fork's added local APIs in Python, install from the root of this checkout with `python -m pip install .`. A build without the cloud client uses `python -m pip install . --config-settings=cmake.define.BUILD_CLOUD_CLIENT=OFF`.
 
 When using CMake, the Python module can be built using the `BUILD_PYTHON_MODULE` flag. If you're only interested in the Python module (and not in the C++ library), you can build and install Ruckig via `pip install .`.
+
+Rust applications can select this checkout with a Cargo path dependency, for example `ruckig = { path = "../ruckig" }` under `[dependencies]` in `Cargo.toml`; adjust the path to this repository.
 
 
 ## Tutorial
