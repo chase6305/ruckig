@@ -14,7 +14,7 @@ bool VelocitySecondOrderStep1::get_profile(const Profile& input, Block& block) {
 
     const double af = (vd > 0) ? _aMax : _aMin;
     p.t[0] = 0;
-    p.t[1] = vd / af;
+    p.t[1] = (vd == 0.0 && af == 0.0) ? 0.0 : vd / af;
     p.t[2] = 0;
     p.t[3] = 0;
     p.t[4] = 0;

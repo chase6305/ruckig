@@ -162,3 +162,74 @@ TEST_CASE("a moving zero-jerk axis still cannot extend its fixed duration") {
     Trajectory<2> trajectory;
     CHECK(solver.calculate(input, trajectory) == Result::ErrorZeroLimits);
 }
+
+TEST_CASE("stationary lower-order axes permit zero limits without dividing zero by zero") {
+    for (auto interface: {ControlInterface::Position, ControlInterface::Velocity}) {
+        INFO("control interface: " << static_cast<int>(interface));
+        InputParameter<2> input;
+        input.current_position = input.target_position = {0.0, 0.0};
+        input.control_interface = interface;
+        input.max_velocity = {0.0, 1.0};
+        input.max_acceleration = input.max_jerk = {std::numeric_limits<double>::infinity(), std::numeric_limits<double>::infinity()};
+        if (interface == ControlInterface::Position) {
+            input.target_position[1] = 1.0;
+        } else {
+            input.target_velocity[1] = 1.0;
+            input.max_acceleration = {0.0, 1.0};
+        }
+        Ruckig<2> solver;
+        Trajectory<2> trajectory;
+        REQUIRE(solver.calculate(input, trajectory) == Result::Working);
+        CHECK(trajectory.get_duration() == 1.0);
+        std::array<double, 2> p, v, a;
+        for (double time: {0.0, 0.25, 0.5, 1.0}) {
+            trajectory.at_time(time, p, v, a);
+            CHECK(p[0] == 0.0);
+            CHECK(v[0] == 0.0);
+            CHECK(a[0] == 0.0);
+        }
+        // A zero limit still rejects motion requiring that derivative.
+        if (interface == ControlInterface::Position) {
+            input.target_position[0] = 0.1;
+            CHECK(solver.calculate(input, trajectory) == Result::ErrorExecutionTimeCalculation);
+        } else {
+            input.target_velocity[0] = 0.1;
+            CHECK(solver.calculate(input, trajectory) == Result::ErrorZeroLimits);
+        }
+    }
+}
+
+TEST_CASE("changing to a lower order discards a previous braking trajectory") {
+    for (auto interface: {ControlInterface::Position, ControlInterface::Velocity}) {
+        InputParameter<2> input;
+        input.current_position = {0.0, 0.0};
+        input.target_position = {5.0, 1.0};
+        input.current_velocity = {3.0, 0.0};
+        input.max_velocity = input.max_acceleration = {2.0, 2.0};
+        input.max_jerk = {4.0, 4.0};
+        Ruckig<2> reused, fresh;
+        Trajectory<2> actual, expected;
+        REQUIRE(reused.calculate(input, actual) == Result::Working);
+        REQUIRE(actual.get_profiles()[0][0].brake.duration > 0.0);
+
+        input.control_interface = interface;
+        input.current_velocity = {0.0, 0.0};
+        input.target_position = {1.0, 3.0};
+        input.max_acceleration[0] = input.max_jerk[0] = std::numeric_limits<double>::infinity();
+        if (interface == ControlInterface::Velocity) input.target_velocity[1] = 1.0;
+        REQUIRE(fresh.calculate(input, expected) == Result::Working);
+        REQUIRE(reused.calculate(input, actual) == Result::Working);
+        CHECK(actual.get_duration() == expected.get_duration());
+        CHECK(actual.get_profiles()[0][0].brake.duration == 0.0);
+        CHECK(actual.get_profiles()[0][0].accel.duration == 0.0);
+        std::array<double, 2> p, v, a, ep, ev, ea;
+        for (size_t sample = 0; sample <= 16; ++sample) {
+            const double time = expected.get_duration() * sample / 16.0;
+            actual.at_time(time, p, v, a);
+            expected.at_time(time, ep, ev, ea);
+            CHECK(p == ep);
+            CHECK(v == ev);
+            CHECK(a == ea);
+        }
+    }
+}

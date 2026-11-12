@@ -16,7 +16,7 @@ bool PositionFirstOrderStep1::get_profile(const Profile& input, Block& block) {
     p.t[0] = 0;
     p.t[1] = 0;
     p.t[2] = 0;
-    p.t[3] = pd / vf;
+    p.t[3] = (pd == 0.0 && vf == 0.0) ? 0.0 : pd / vf;
     p.t[4] = 0;
     p.t[5] = 0;
     p.t[6] = 0;

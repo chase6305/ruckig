@@ -122,6 +122,7 @@ void BrakeProfile::get_velocity_brake_trajectory(double a0, double aMax, double 
 }
 
 void BrakeProfile::get_second_order_velocity_brake_trajectory() {
+    duration = 0.0;
     t[0] = 0.0;
     t[1] = 0.0;
     j[0] = 0.0;
