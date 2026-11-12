@@ -69,6 +69,7 @@ if(BUILD_TESTS)
   endif()
 
   add_executable(test-target test/test_target.cpp)
+  target_sources(test-target PRIVATE test/test_block_reuse.cpp)
   target_link_libraries(test-target PRIVATE test-dependencies)
   add_test(NAME test-target COMMAND test-target)
   add_executable(test-local-waypoints test/test_local_waypoints.cpp)

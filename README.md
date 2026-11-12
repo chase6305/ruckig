@@ -288,7 +288,7 @@ The `endpoint-2d` case includes repeated boundary positions with nonzero endpoin
 
 A third table measures early queries and the same near-end positions with `time_after=0` and `time_after=T-0.25` on local constant-speed chains of 100, 1,000 and 10,000 sections. It reports median time per query from 11 batches of 128 calls after one warm-up batch, including Python call overhead; construction and correctness checks stay outside timing.
 
-The failed reference recovery table uses with 32 waypoints and 2, 12 or 32 axes. These zero-jerk inputs pass validation, but their constant-acceleration motion violates a position bound; the expected return is `ErrorZeroLimits`.
+The failed reference recovery table uses 32 waypoints and 2, 12 or 32 axes. These zero-jerk inputs pass validation, but their constant-acceleration motion violates a position bound; the expected return is `ErrorZeroLimits`.
 
 The refinement scaling table uses 19 curved waypoints and 6, 12 or 32 axes. It compares moving every axis with moving only two, reporting median planning time and the resulting trajectory duration with the same 8-sweep budget.
 

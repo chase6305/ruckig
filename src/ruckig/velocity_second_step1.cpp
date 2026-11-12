@@ -23,6 +23,8 @@ bool VelocitySecondOrderStep1::get_profile(const Profile& input, Block& block) {
 
     if (p.check_for_second_order_velocity<Profile::ControlSigns::UDDU, Profile::ReachedLimits::ACC0>(af)) {
         block.t_min = p.t_sum.back() + p.brake.duration + p.accel.duration;
+        block.a = std::nullopt;
+        block.b = std::nullopt;
         return true;
     }
     return false;

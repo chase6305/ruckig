@@ -603,6 +603,41 @@ mod tests {
     }
 
     #[test]
+    fn refined_multi_axis_trajectory_owns_its_samples() {
+        let plan = |dofs: usize| {
+            let mut input = InputParameter::new(dofs);
+            input.target_position = vec![0.0; dofs];
+            input.target_position[0] = 3.0;
+            input.target_position[dofs - 1] = 1.5;
+            input.max_velocity = vec![2.0; dofs];
+            input.max_acceleration = vec![2.0; dofs];
+            input.max_jerk = vec![4.0; dofs];
+            input.intermediate_positions = [[0.4, 0.2], [0.8, 0.6], [1.4, 0.4], [2.0, 0.8]].iter().map(|point| {
+                let mut embedded = vec![0.0; dofs];
+                embedded[0] = point[0];
+                embedded[dofs - 1] = point[1];
+                embedded
+            }).collect();
+            let mut trajectory = Trajectory::new_direct(dofs);
+            let mut otg = Ruckig::new_direct_and_offline(dofs);
+            assert_eq!(otg.optimize_waypoints(&mut input, &mut trajectory, 8), Result::Working);
+            trajectory
+        };
+        let oracle = plan(2);
+        let embedded = plan(6);
+        assert_eq!(embedded.get_duration(), oracle.get_duration());
+        for i in 0..=16 {
+            let time = oracle.get_duration() * i as f64 / 16.0;
+            let (p, v, a) = embedded.at_time(time);
+            let (ep, ev, ea) = oracle.at_time(time);
+            for (actual, expected) in [(&p, &ep), (&v, &ev), (&a, &ea)] {
+                assert_eq!([actual[0], actual[5]], [expected[0], expected[1]]);
+                assert_eq!(actual[1..5], [0.0; 4]);
+            }
+        }
+    }
+
+    #[test]
     fn zero_jerk_reference_recovers_after_failed_stopping_baseline() {
         use std::panic::{catch_unwind, AssertUnwindSafe};
 

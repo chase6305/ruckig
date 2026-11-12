@@ -384,6 +384,29 @@ class LocalPlanningRegressionTest(unittest.TestCase):
             self.assertAlmostEqual(p[0], point[0])
             self.assertAlmostEqual(p[1], point[1])
 
+    def test_refined_multi_axis_trajectory_owns_its_samples(self):
+        def plan(dofs):
+            inp = InputParameter(dofs)
+            inp.target_position = [3.0] + [0.0] * (dofs - 2) + [1.5]
+            inp.max_velocity = inp.max_acceleration = [2.0] * dofs
+            inp.max_jerk = [4.0] * dofs
+            inp.intermediate_positions = [
+                [x] + [0.0] * (dofs - 2) + [y]
+                for x, y in [(0.4, 0.2), (0.8, 0.6), (1.4, 0.4), (2.0, 0.8)]
+            ]
+            trajectory = Trajectory(dofs)
+            self.assertEqual(Ruckig(dofs).optimize_waypoints(inp, trajectory), Result.Working)
+            return trajectory
+
+        oracle, embedded = plan(2), plan(6)
+        self.assertEqual(embedded.duration, oracle.duration)
+        self.assertEqual(embedded.intermediate_durations, oracle.intermediate_durations)
+        for i in range(17):
+            time = oracle.duration * i / 16
+            for actual, expected in zip(embedded.at_time(time), oracle.at_time(time)):
+                self.assertEqual([actual[0], actual[-1]], expected)
+                self.assertEqual(actual[1:-1], [0.0] * 4)
+
     def test_filter_waypoints_locally_and_validate_thresholds(self):
         inp = InputParameter(2)
         inp.current_position = [0.0, 0.0]
