@@ -966,16 +966,16 @@ public:
             section_input.intermediate_positions.clear();
             section_input.per_section_minimum_duration.reset();
             using Target = TargetCalculator<DOFs, CustomVector>;
-            using Cache = typename Target::Step1Cache;
-            bool reuse_step1 = degrees_of_freedom >= 3;
-            for (size_t d = 0; reuse_step1 && d < degrees_of_freedom; ++d) {
+            using Cache = typename Target::LocalCache;
+            bool reuse_axis = degrees_of_freedom >= 3;
+            for (size_t d = 0; reuse_axis && d < degrees_of_freedom; ++d) {
                 const double min_a = input.min_acceleration ? (*input.min_acceleration)[d] : -input.max_acceleration[d];
-                reuse_step1 = std::isfinite(input.max_jerk[d]) && input.max_jerk[d] > 0.0
+                reuse_axis = std::isfinite(input.max_jerk[d]) && input.max_jerk[d] > 0.0
                     && input.max_acceleration[d] > 0.0 && min_a < 0.0;
             }
             std::optional<Target> left_calculator, right_calculator;
-            Cache left_cache(reuse_step1 ? degrees_of_freedom : 0), right_cache(left_cache.size());
-            if (reuse_step1) {
+            Cache left_cache(reuse_axis ? degrees_of_freedom : 0), right_cache(left_cache.size());
+            if (reuse_axis) {
                 if constexpr (DOFs == 0) {
                     left_calculator.emplace(degrees_of_freedom);
                     right_calculator.emplace(degrees_of_freedom);

@@ -8,6 +8,7 @@
 #include <optional>
 #include <tuple>
 #include <type_traits>
+#include <utility>
 #include <vector>
 
 #include <ruckig/block.hpp>
@@ -46,7 +47,16 @@ private:
 
     // Each cache belongs to this calculator's blocks and is used only by the
     // local optimizer with enabled, third-order position-controlled axes.
-    using Step1Cache = std::vector<std::optional<std::array<double, 12>>>;
+    struct LocalCacheEntry {
+        std::optional<std::array<double, 12>> state;
+        std::optional<std::pair<double, Profile>> synchronized;
+
+        void reset() {
+            state.reset();
+            synchronized.reset();
+        }
+    };
+    using LocalCache = std::vector<LocalCacheEntry>;
 
     //! Is the trajectory (in principle) phase synchronizable?
     bool is_input_collinear(const InputParameter<DOFs, CustomVector>& inp, Profile::Direction limiting_direction, size_t limiting_dof) {
@@ -236,8 +246,8 @@ public:
     }
 
 private:
-    template<bool throw_error, bool reuse_step1>
-    Result calculate_impl(const InputParameter<DOFs, CustomVector>& inp, Trajectory<DOFs, CustomVector>& traj, double delta_time, bool& was_interrupted, Step1Cache* cache) {
+    template<bool throw_error, bool reuse_axis>
+    Result calculate_impl(const InputParameter<DOFs, CustomVector>& inp, Trajectory<DOFs, CustomVector>& traj, double delta_time, bool& was_interrupted, LocalCache* cache) {
         was_interrupted = false;
 #if defined WITH_CLOUD_CLIENT
         traj.independent_min_durations_available = true;
@@ -281,7 +291,7 @@ private:
             inp_per_dof_synchronization[dof] = inp.per_dof_synchronization ? inp.per_dof_synchronization.value()[dof] : inp.synchronization;
 
             if (!inp.enabled[dof]) {
-                if constexpr (reuse_step1) {
+                if constexpr (reuse_axis) {
                     (*cache)[dof].reset();
                 }
                 p = Profile{};
@@ -298,13 +308,13 @@ private:
             }
 
             [[maybe_unused]] std::array<double, 12> state;
-            if constexpr (reuse_step1) {
+            if constexpr (reuse_axis) {
                 state = {inp.current_position[dof], inp.current_velocity[dof], inp.current_acceleration[dof],
                     inp.target_position[dof], inp.target_velocity[dof], inp.target_acceleration[dof],
                     inp.max_velocity[dof], inp.max_acceleration[dof], inp.max_jerk[dof],
                     inp_min_velocity[dof], inp_min_acceleration[dof], static_cast<double>(inp_per_dof_control_interface[dof])};
                 auto& previous = (*cache)[dof];
-                if (previous && std::memcmp(previous->data(), state.data(), state.size() * sizeof(double)) == 0) {
+                if (previous.state && std::memcmp(previous.state->data(), state.data(), state.size() * sizeof(double)) == 0) {
                     // Restore the pre-Step2 boundary, including initial braking.
                     p.set_boundary(blocks[dof].p_min);
                     traj.independent_min_durations[dof] = blocks[dof].t_min;
@@ -389,8 +399,8 @@ private:
             }
 
             traj.independent_min_durations[dof] = blocks[dof].t_min;
-            if constexpr (reuse_step1) {
-                (*cache)[dof] = state;
+            if constexpr (reuse_axis) {
+                (*cache)[dof].state = state;
             }
             // std::cout << dof << " profile step1: " << blocks[dof].to_string() << std::endl;
         }
@@ -553,6 +563,16 @@ private:
                 continue;
             }
 
+            if constexpr (reuse_axis) {
+                // Phase and extremal-profile choices take priority. For a Step2
+                // solve, unchanged inputs and duration also preserve brake timing.
+                const auto& synchronized = (*cache)[dof].synchronized;
+                if (synchronized && synchronized->first == traj.duration) {
+                    p = synchronized->second;
+                    continue;
+                }
+            }
+
             bool found_time_synchronization {false};
             switch (inp_per_dof_control_interface[dof]) {
                 case ControlInterface::Position: {
@@ -582,6 +602,9 @@ private:
                     throw RuckigError("error in step 2 in dof: " + std::to_string(dof) + " for t sync: " + std::to_string(traj.duration) + " input: " + inp.to_string());
                 }
                 return Result::ErrorSynchronizationCalculation;
+            }
+            if constexpr (reuse_axis) {
+                (*cache)[dof].synchronized.emplace(traj.duration, p);
             }
             // std::cout << dof << " profile step2: " << p.to_string() << std::endl;
         }
