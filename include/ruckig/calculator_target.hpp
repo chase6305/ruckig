@@ -2,11 +2,13 @@
 
 #include <algorithm>
 #include <array>
+#include <cstring>
 #include <iostream>
 #include <limits>
 #include <optional>
 #include <tuple>
 #include <type_traits>
+#include <vector>
 
 #include <ruckig/block.hpp>
 #include <ruckig/brake.hpp>
@@ -24,6 +26,8 @@ namespace ruckig {
 template<size_t DOFs, template<class, size_t> class CustomVector = StandardVector>
 class TargetCalculator {
 private:
+    template<size_t, template<class, size_t> class, bool> friend class Ruckig;
+
     template<class T> using Vector = CustomVector<T, DOFs>;
     template<class T> using StandardVectorIntervals = StandardSizeVector<T, DOFs, 3*DOFs+1>;
 
@@ -39,6 +43,10 @@ private:
 
     StandardVector<ControlInterface, DOFs> inp_per_dof_control_interface;
     StandardVector<Synchronization, DOFs> inp_per_dof_synchronization;
+
+    // Each cache belongs to this calculator's blocks and is used only by the
+    // local optimizer with enabled, third-order position-controlled axes.
+    using Step1Cache = std::vector<std::optional<std::array<double, 12>>>;
 
     //! Is the trajectory (in principle) phase synchronizable?
     bool is_input_collinear(const InputParameter<DOFs, CustomVector>& inp, Profile::Direction limiting_direction, size_t limiting_dof) {
@@ -224,6 +232,12 @@ public:
     //! Calculate the time-optimal waypoint-based trajectory
     template<bool throw_error>
     Result calculate(const InputParameter<DOFs, CustomVector>& inp, Trajectory<DOFs, CustomVector>& traj, double delta_time, bool& was_interrupted) {
+        return calculate_impl<throw_error, false>(inp, traj, delta_time, was_interrupted, nullptr);
+    }
+
+private:
+    template<bool throw_error, bool reuse_step1>
+    Result calculate_impl(const InputParameter<DOFs, CustomVector>& inp, Trajectory<DOFs, CustomVector>& traj, double delta_time, bool& was_interrupted, Step1Cache* cache) {
         was_interrupted = false;
 #if defined WITH_CLOUD_CLIENT
         traj.independent_min_durations_available = true;
@@ -267,6 +281,9 @@ public:
             inp_per_dof_synchronization[dof] = inp.per_dof_synchronization ? inp.per_dof_synchronization.value()[dof] : inp.synchronization;
 
             if (!inp.enabled[dof]) {
+                if constexpr (reuse_step1) {
+                    (*cache)[dof].reset();
+                }
                 p = Profile{};
                 p.p.back() = inp.current_position[dof];
                 p.v.back() = inp.current_velocity[dof];
@@ -278,6 +295,23 @@ public:
                 blocks[dof].b = std::nullopt;
                 blocks[dof].p_min = p;
                 continue;
+            }
+
+            [[maybe_unused]] std::array<double, 12> state;
+            if constexpr (reuse_step1) {
+                state = {inp.current_position[dof], inp.current_velocity[dof], inp.current_acceleration[dof],
+                    inp.target_position[dof], inp.target_velocity[dof], inp.target_acceleration[dof],
+                    inp.max_velocity[dof], inp.max_acceleration[dof], inp.max_jerk[dof],
+                    inp_min_velocity[dof], inp_min_acceleration[dof], static_cast<double>(inp_per_dof_control_interface[dof])};
+                auto& previous = (*cache)[dof];
+                if (previous && std::memcmp(previous->data(), state.data(), state.size() * sizeof(double)) == 0) {
+                    // Restore the pre-Step2 boundary, including initial braking.
+                    p.set_boundary(blocks[dof].p_min);
+                    traj.independent_min_durations[dof] = blocks[dof].t_min;
+                    continue;
+                }
+                // A failed solve may partially overwrite the old block.
+                previous.reset();
             }
 
             // Calculate brake (if input exceeds or will exceed limits)
@@ -355,6 +389,9 @@ public:
             }
 
             traj.independent_min_durations[dof] = blocks[dof].t_min;
+            if constexpr (reuse_step1) {
+                (*cache)[dof] = state;
+            }
             // std::cout << dof << " profile step1: " << blocks[dof].to_string() << std::endl;
         }
 
@@ -552,6 +589,7 @@ public:
         return Result::Working;
     }
 
+public:
     //! Continue the trajectory calculation
     template<bool throw_error>
     Result continue_calculation(const InputParameter<DOFs, CustomVector>&, Trajectory<DOFs, CustomVector>&, double, bool&) {
