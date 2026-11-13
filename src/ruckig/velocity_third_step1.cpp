@@ -101,6 +101,8 @@ bool VelocityThirdOrderStep1::get_profile(const Profile& input, Block& block) {
 
         if (time_all_single_step(&p, _aMax, _aMin, _jMax)) {
             block.t_min = p.t_sum.back() + p.brake.duration + p.accel.duration;
+            block.a = std::nullopt;
+            block.b = std::nullopt;
             if (std::abs(a0) > DBL_EPSILON) {
                 block.a = Block::Interval(block.t_min, std::numeric_limits<double>::infinity());
             }

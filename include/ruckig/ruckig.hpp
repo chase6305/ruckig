@@ -23,6 +23,8 @@ namespace ruckig {
 //! Main interface for the Ruckig algorithm
 template<size_t DOFs = 0, template<class, size_t> class CustomVector = StandardVector, bool throw_error = false>
 class Ruckig {
+    template<size_t, template<class, size_t> class, bool> friend class Ruckig;
+
     //! Current input, only for comparison for recalculation
     InputParameter<DOFs, CustomVector> current_input;
 
@@ -288,6 +290,14 @@ public:
 
     //! Calculate a new trajectory for the given input and check for interruption
     Result calculate(const InputParameter<DOFs, CustomVector>& input, Trajectory<DOFs, CustomVector>& trajectory, bool& was_interrupted) {
+        return calculate_impl(input, trajectory, [&]() {
+            return calculator.template calculate<throw_error>(input, trajectory, delta_time, was_interrupted);
+        });
+    }
+
+private:
+    template<class Calculate>
+    Result calculate_impl(const InputParameter<DOFs, CustomVector>& input, Trajectory<DOFs, CustomVector>& trajectory, Calculate&& calculate) {
         current_input_initialized = false;
         trajectory.calculated = false;
         trajectory.profiles_calculated = false;
@@ -303,7 +313,7 @@ public:
             return Result::ErrorInvalidInput;
         }
 
-        const auto result = calculator.template calculate<throw_error>(input, trajectory, delta_time, was_interrupted);
+        const auto result = calculate();
         if (result != Result::Working) {
             return result;
         }
@@ -315,6 +325,7 @@ public:
         return result;
     }
 
+public:
     //! Calculate a local chain. Omitted intermediate velocities/accelerations default to zero.
     //! This offline operation allocates memory; it does not optimize the intermediate states.
     Result calculate_waypoints(const InputParameter<DOFs, CustomVector>& input, Trajectory<DOFs, CustomVector>& trajectory,
@@ -954,7 +965,26 @@ public:
             auto section_input = input;
             section_input.intermediate_positions.clear();
             section_input.per_section_minimum_duration.reset();
-            const auto solve_section = [&](size_t i, Trajectory<DOFs, CustomVector>& section) {
+            using Target = TargetCalculator<DOFs, CustomVector>;
+            using Cache = typename Target::LocalCache;
+            bool reuse_axis = degrees_of_freedom >= 3;
+            for (size_t d = 0; reuse_axis && d < degrees_of_freedom; ++d) {
+                const double min_a = input.min_acceleration ? (*input.min_acceleration)[d] : -input.max_acceleration[d];
+                reuse_axis = std::isfinite(input.max_jerk[d]) && input.max_jerk[d] > 0.0
+                    && input.max_acceleration[d] > 0.0 && min_a < 0.0;
+            }
+            std::optional<Target> left_calculator, right_calculator;
+            Cache left_cache(reuse_axis ? degrees_of_freedom : 0), right_cache(left_cache.size());
+            if (reuse_axis) {
+                if constexpr (DOFs == 0) {
+                    left_calculator.emplace(degrees_of_freedom);
+                    right_calculator.emplace(degrees_of_freedom);
+                } else {
+                    left_calculator.emplace();
+                    right_calculator.emplace();
+                }
+            }
+            const auto solve_section = [&](size_t i, Trajectory<DOFs, CustomVector>& section, Target* target = nullptr, Cache* cache = nullptr) {
                 if (input.per_section_minimum_duration) {
                     section_input.minimum_duration = (*input.per_section_minimum_duration)[i];
                 }
@@ -965,6 +995,12 @@ public:
                     section_input.target_position[d] = i == count ? input.target_position[d] : input.intermediate_positions[i][d];
                     section_input.target_velocity[d] = i == count ? input.target_velocity[d] : velocities[i][d];
                     section_input.target_acceleration[d] = i == count ? input.target_acceleration[d] : accelerations[i][d];
+                }
+                if (target) {
+                    return evaluator.calculate_impl(section_input, section, [&]() {
+                        bool was_interrupted = false;
+                        return target->template calculate_impl<false, true>(section_input, section, delta_time, was_interrupted, cache);
+                    });
                 }
                 return evaluator.calculate(section_input, section);
             };
@@ -997,10 +1033,12 @@ public:
                     state_input.current_velocity[d] = state_input.target_velocity[d] = velocities[i][d];
                     state_input.current_acceleration[d] = state_input.target_acceleration[d] = accelerations[i][d];
                 }
-                if (state_input.template validate<false>(true, true) && solve_section(i, left_trial) == Result::Working) {
+                if (state_input.template validate<false>(true, true)
+                    && solve_section(i, left_trial, left_calculator ? &*left_calculator : nullptr, &left_cache) == Result::Working) {
                     // The right section's nonnegative duration cannot lower this bound.
                     const double best_possible = total - sections[i].duration - sections[i + 1].duration + left_trial.duration;
-                    if (best_possible < total - 1e-10 * std::max(1.0, total) && solve_section(i + 1, right_trial) == Result::Working) {
+                    if (best_possible < total - 1e-10 * std::max(1.0, total)
+                        && solve_section(i + 1, right_trial, right_calculator ? &*right_calculator : nullptr, &right_cache) == Result::Working) {
                         const double next = total - sections[i].duration - sections[i + 1].duration + left_trial.duration + right_trial.duration;
                         if (std::isfinite(next) && next <= 7.6e3 && next < total - 1e-10 * std::max(1.0, total)) {
                             sections[i] = left_trial;
@@ -1049,23 +1087,31 @@ public:
                     }
                     for (size_t d = 0; d < degrees_of_freedom; ++d) {
                         for (double sign: {-1.0, 1.0}) {
-                            v = velocities[i];
-                            a = accelerations[i];
-                            v[d] = std::clamp(v[d] + sign * step * velocity_scale[i][d], v_lower[i][d], v_upper[i][d]);
-                            if (!joint_seen(v, a)) {
-                                try_state(i, v, a);
+                            const double trial_v = std::clamp(velocities[i][d] + sign * step * velocity_scale[i][d], v_lower[i][d], v_upper[i][d]);
+                            if (trial_v != velocities[i][d]) {
+                                v = velocities[i];
+                                a = accelerations[i];
+                                v[d] = trial_v;
+                                if (!joint_seen(v, a)) {
+                                    try_state(i, v, a);
+                                }
                             }
-                            v = velocities[i];
-                            a = accelerations[i];
-                            a[d] = std::clamp(a[d] + sign * step * acceleration_scale[i][d], a_lower[i][d], a_upper[i][d]);
-                            if (!joint_seen(v, a)) {
-                                try_state(i, v, a);
+                            const double trial_a = std::clamp(accelerations[i][d] + sign * step * acceleration_scale[i][d], a_lower[i][d], a_upper[i][d]);
+                            if (trial_a != accelerations[i][d]) {
+                                v = velocities[i];
+                                a = accelerations[i];
+                                a[d] = trial_a;
+                                if (!joint_seen(v, a)) {
+                                    try_state(i, v, a);
+                                }
                             }
                         }
                     }
                 }
             }
             auto result = make_trajectory();
+            result.local_profiles.reserve(count + 1);
+            result.local_cumulative_times.reserve(count + 1);
             for (size_t d = 0; d < degrees_of_freedom; ++d) {
                 result.independent_min_durations[d] = 0.0;
             }

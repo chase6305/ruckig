@@ -7,6 +7,41 @@ import time
 from ruckig import InputParameter, Result, Ruckig, Trajectory
 
 
+def benchmark_refinement_scaling():
+    points = 19
+    print(f'\n{"DoFs":>6} {"Moving axes":>12} {"Waypoints":>10} {"Auto (s)":>12} {"Median (us)":>14}')
+    for dofs in (6, 12, 32):
+        for moving in (2, dofs):
+            inp = InputParameter(dofs)
+            inp.current_position = [0.0] * dofs
+            inp.max_velocity = inp.max_acceleration = [2.0] * dofs
+            inp.max_jerk = [4.0] * dofs
+            inp.min_position, inp.max_position = [-10.0] * dofs, [10.0] * dofs
+            route = []
+            for k in range(1, points + 2):
+                angle = math.pi * k / (2 * (points + 1))
+                point = [0.0] * dofs
+                for d in range(moving):
+                    coordinate = math.sin(angle) if d % 2 == 0 else 1 - math.cos(angle)
+                    point[d] = coordinate * (1 - 0.003 * d if moving == dofs else 1.0)
+                route.append(point)
+            inp.intermediate_positions, inp.target_position = route[:-1], route[-1]
+            otg, trajectory = Ruckig(dofs), Trajectory(dofs)
+            if otg.calculate_waypoints(inp, trajectory) != Result.Working:
+                raise RuntimeError(f'{dofs} axes: stopping calculation failed')
+            stopping_duration = trajectory.duration
+            measurements = []
+            for repetition in range(12):
+                start = time.perf_counter_ns()
+                result = otg.optimize_waypoints(inp, trajectory)
+                elapsed_us = (time.perf_counter_ns() - start) / 1000
+                if result != Result.Working or trajectory.duration > stopping_duration + 1e-8:
+                    raise RuntimeError(f'{dofs} axes: refinement failed or exceeded the stopping duration')
+                if repetition > 0:
+                    measurements.append(elapsed_us)
+            print(f'{dofs:>6} {moving:>12} {points:>10} {trajectory.duration:>12.6f} {statistics.median(measurements):>14.1f}')
+
+
 def benchmark_failed_reference_recovery():
     points = 32
     print(f'\n{"DoFs":>6} {"Input points":>12} {"Expected failure":>22} {"Median (us)":>14}')
@@ -163,6 +198,7 @@ def main():
 
     benchmark_position_queries()
     benchmark_failed_reference_recovery()
+    benchmark_refinement_scaling()
 
 
 if __name__ == '__main__':

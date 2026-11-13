@@ -103,3 +103,26 @@ TEST_CASE("cloud query windows include zero-duration responses") {
         std::nextafter(0.0, std::numeric_limits<double>::infinity())).has_value());
     CHECK_FALSE(trajectory.get_first_time_at_position(0, 8.0).has_value());
 }
+
+TEST_CASE("a new target calculation discards cloud post-trajectory metadata") {
+    auto profile = query_phase(0.0, 1.0, 0.0, 0.0, 1.0);
+    profile.accel.duration = 0.5;
+    profile.accel.t = {0.5, 0.0};
+    profile.accel.p = {1.0, 1.5};
+    profile.accel.v = {1.0, 1.0};
+    auto trajectory = decoded_query_trajectory({profile}, {1.5});
+    REQUIRE(trajectory.get_profiles()[0][0].accel.duration == 0.5);
+
+    Ruckig<1> solver;
+    InputParameter<1> input;
+    input.current_position = {0.0};
+    input.target_position = {3.0};
+    input.max_velocity = input.max_acceleration = {2.0};
+    input.max_jerk = {4.0};
+    Trajectory<1> expected;
+    REQUIRE(solver.calculate(input, expected) == Result::Working);
+    REQUIRE(solver.calculate(input, trajectory) == Result::Working);
+    CHECK(trajectory.get_duration() == expected.get_duration());
+    CHECK(trajectory.get_profiles()[0][0].accel.duration == 0.0);
+    CHECK(trajectory.get_independent_min_durations() == expected.get_independent_min_durations());
+}

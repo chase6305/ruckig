@@ -248,6 +248,8 @@ In C++/Python, `get_first_time_at_position(dof, position, time_after=0.0)` retur
 
 `max_iterations` defaults to 8 in C++/Python, accepts 0 through 64, and bounds refinement sweeps per seed. Rust requires this argument explicitly. Zero calculates only the stopping baseline. With zero jerk limits, a feasible route may need nonzero intermediate velocity or acceleration; automatic state selection can recover such motion when the stopping baseline fails. On this recovery path, identical crossing-time vectors that already failed reconstruction are skipped within the same reference pass; distinct times are still tried. More sweeps can increase planning cost, and up to two seeds are refined. The iteration limit does not cap reference-coordinate or phase-root attempts, whose cost also grows with axis and waypoint counts. The bounded heuristic can miss a feasible solution and does not prove infeasibility or global time optimality. Fixed-state `calculate_waypoints` avoids this search; neither local API guarantees the globally shortest multi-waypoint trajectory. Position, velocity and acceleration match at joins within solver tolerances; jerk may jump within its limits. Passing through joint-space points does not guarantee following the original geometric path or avoiding obstacles.
 
+For third-order inputs with at least three axes, positive jerk limits and two-sided acceleration limits, refinement reuses independent-axis calculations whose complete inputs match exactly. Successful per-axis synchronized profiles can also be reused when the synchronized duration matches. This reuse lasts only for the current refinement pass; every trial still goes through synchronization and position-bound checks. Unchanged coordinate proposals are skipped before copying state vectors, including stationary axes.
+
 Reduce unnecessary waypoint density when the application permits geometric deviation. `filter_intermediate_positions(input, threshold_distance)` is fully local in C++/Python in both cloud configurations. It requires one finite nonnegative threshold per DoF and checks all axes, including coordinates equal at the candidate segment's endpoints. Windows whose interior points vary along only one coordinate use running extrema, including multi-axis paths with stationary coordinates; fully one-coordinate routes are processed in linear time. Filtering changes the point list, so apply it only when every original point need not be visited:
 
 ```python
@@ -260,7 +262,7 @@ inp.intermediate_positions = otg.filter_intermediate_positions(inp, [0.01, 0.01]
 for cloud_client in OFF ON; do
     cmake -S . -B "build-local-$cloud_client" -DCMAKE_BUILD_TYPE=Release \
         -DBUILD_CLOUD_CLIENT="$cloud_client" -DBUILD_TESTS=ON -DBUILD_EXAMPLES=ON
-    cmake --build "build-local-$cloud_client" --parallel
+    cmake --build "build-local-$cloud_client" --parallel 2
     ctest --test-dir "build-local-$cloud_client" --output-on-failure
     "./build-local-$cloud_client/example-17_local_waypoints"
 done
@@ -286,7 +288,9 @@ The `endpoint-2d` case includes repeated boundary positions with nonzero endpoin
 
 A third table measures early queries and the same near-end positions with `time_after=0` and `time_after=T-0.25` on local constant-speed chains of 100, 1,000 and 10,000 sections. It reports median time per query from 11 batches of 128 calls after one warm-up batch, including Python call overhead; construction and correctness checks stay outside timing.
 
-A final table measures failed reference recovery with 32 waypoints and 2, 12 or 32 axes. These zero-jerk inputs pass validation, but their constant-acceleration motion violates a position bound; the expected return is `ErrorZeroLimits`.
+The failed reference recovery table uses 32 waypoints and 2, 12 or 32 axes. These zero-jerk inputs pass validation, but their constant-acceleration motion violates a position bound; the expected return is `ErrorZeroLimits`.
+
+The refinement scaling table uses 19 curved waypoints and 6, 12 or 32 axes. It compares moving every axis with moving only two, reporting median planning time and the resulting trajectory duration with the same 8-sweep budget.
 
 ```bash
 cargo test --locked
