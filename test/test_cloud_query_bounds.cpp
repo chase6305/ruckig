@@ -32,7 +32,9 @@ Profile query_phase(double p, double v, double a, double j, double duration) {
 // Exercise the production post/decoder using structurally accepted responses.
 // Phase supports can differ from logical sections. Queries must use the same
 // time supports as production sampling, including closed terminal boundaries.
-Trajectory<1> decoded_query_trajectory(const std::vector<Profile>& profiles, const std::vector<double>& ends) {
+Trajectory<1> decoded_query_trajectory(const std::vector<Profile>& profiles, const std::vector<double>& ends,
+    std::array<double, 2> bounds = {-std::numeric_limits<double>::infinity(), std::numeric_limits<double>::infinity()},
+    Result expected = Result::Working) {
     std::vector<std::array<Profile, 1>> rows;
     for (const auto& profile: profiles) rows.push_back({profile});
     nlohmann::json response {{"result", "Result.Working"}, {"profiles", rows},
@@ -44,10 +46,12 @@ Trajectory<1> decoded_query_trajectory(const std::vector<Profile>& profiles, con
     input.target_position = {profiles.back().pf};
     input.max_velocity = input.max_acceleration = {2.0};
     input.max_jerk = {4.0};
+    input.min_position = {bounds[0]};
+    input.max_position = {bounds[1]};
     input.intermediate_positions = {{0.0}};
     Trajectory<1> trajectory(4);
     const auto posts_before = httplib::test_posts;
-    REQUIRE(solver.calculate(input, trajectory) == Result::Working);
+    REQUIRE(solver.calculate(input, trajectory) == expected);
     CHECK(httplib::test_posts == posts_before + 1);
     return trajectory;
 }
@@ -179,6 +183,58 @@ TEST_CASE("position queries refine crossings across very wide time ranges") {
             CHECK(std::abs(actual - position) < 1e-9);
         }
     }
+}
+
+TEST_CASE("cloud extrema and position limits follow sampled phase and braking supports") {
+    const double infinity = std::numeric_limits<double>::infinity();
+    auto extended = query_phase(0.0, 1.0, 0.0, 0.0, 0.5);
+    for (size_t step = 3; step < 7; ++step) extended.t_sum[step] = 2.0;
+    const auto extended_trajectory = decoded_query_trajectory({extended}, {2.0});
+    std::array<Bound, 1> extrema;
+    extended_trajectory.get_position_extrema(extrema);
+    CHECK(extrema[0].min == 0.0);
+    CHECK(extrema[0].max == std::nextafter(2.0, 0.0));
+    CHECK(extrema[0].t_max == std::nextafter(2.0, 0.0));
+    decoded_query_trajectory({extended}, {2.0}, {-infinity, 1.0}, Result::ErrorPositionalLimits);
+
+    const auto truncated = query_phase(0.0, 1.0, 0.0, 0.0, 2.0);
+    const auto truncated_trajectory = decoded_query_trajectory({truncated}, {0.5}, {-infinity, 1.0});
+    truncated_trajectory.get_position_extrema(extrema);
+    CHECK(extrema[0].min == 0.0);
+    CHECK(extrema[0].max == 0.5);
+    CHECK(extrema[0].t_max == 0.5);
+
+    auto braking = query_phase(0.5, 0.0, 0.0, 0.0, 0.5);
+    braking.brake.duration = 2.0;
+    braking.brake.t = {0.25, 0.25};
+    braking.brake.p = {0.0, 0.25};
+    braking.brake.v = {1.0, 1.0};
+    braking.brake.a = {0.0, -1.0};
+    const auto braking_trajectory = decoded_query_trajectory({braking}, {2.5});
+    braking_trajectory.get_position_extrema(extrema);
+    CHECK(extrema[0].max == 0.75);
+    CHECK(extrema[0].t_max == doctest::Approx(1.25));
+    decoded_query_trajectory({braking}, {2.5}, {-infinity, 0.6}, Result::ErrorPositionalLimits);
+}
+
+TEST_CASE("cloud extrema locate rounded phase transitions by the sampler comparison") {
+    const double prefix = 0.0018219466777782895, begin = 0.0012339725813650534, end = 0.0019848046019890486;
+    auto profile = query_phase(2550.5042361533315, 2731174.6480475105, -169424696.66111404, -2523730255021.1367, end - begin);
+    for (size_t step = 0; step < 7; ++step) profile.t_sum[step] = step < 3 ? begin : end;
+    profile.p[0] = profile.v[0] = profile.a[0] = profile.j[0] = 0.0;
+    profile.p.back() = profile.v.back() = profile.a.back() = profile.pf = profile.vf = profile.af = 0.0;
+    const double duration = prefix + end;
+    const auto trajectory = decoded_query_trajectory({query_phase(0.0, 0.0, 0.0, 0.0, prefix), profile}, {prefix, duration});
+    const double adjacent = std::nextafter(duration, 0.0), before = std::nextafter(adjacent, 0.0);
+    double adjacent_position, before_position;
+    trajectory.at_time(adjacent, adjacent_position);
+    trajectory.at_time(before, before_position);
+    REQUIRE(adjacent_position == 0.0);
+    REQUIRE(before_position > 4000.0);
+    std::array<Bound, 1> extrema;
+    trajectory.get_position_extrema(extrema);
+    CHECK(extrema[0].max == before_position);
+    CHECK(extrema[0].t_max == before);
 }
 
 TEST_CASE("cloud query windows include zero-duration responses") {

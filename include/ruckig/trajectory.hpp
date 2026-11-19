@@ -185,7 +185,88 @@ class Trajectory {
         return position;
     }
 
+    // Visit the polynomial supports selected by ordinary sampling. Raw phase
+    // durations in cloud responses need not describe the same timeline.
+    template<typename Func>
+    static bool visit_sampling_steps(const Profile& profile, double section_duration, Func&& visit) {
+        if (profile.brake.duration > 0.0) {
+            const auto& brake = profile.brake;
+            if (brake.t[0] > 0.0 && visit(0.0, 0.0, std::min(brake.t[0], brake.duration),
+                brake.p[0], brake.v[0], brake.a[0], brake.j[0])) return true;
+            if (brake.t[0] < brake.duration && visit(0.0, brake.t[0], brake.duration,
+                brake.p[1], brake.v[1], brake.a[1], brake.j[1])) return true;
+        }
+        double phase_start = 0.0;
+        for (size_t phase = 0; phase < 7; ++phase) {
+            if (phase_start < profile.t_sum[phase] && visit(profile.brake.duration, phase_start, profile.t_sum[phase],
+                profile.p[phase], profile.v[phase], profile.a[phase], profile.j[phase])) return true;
+            phase_start = profile.t_sum[phase];
+        }
+        return visit(profile.brake.duration, phase_start, section_duration - profile.brake.duration,
+            profile.p.back(), profile.v.back(), profile.a.back(), 0.0);
+    }
+
+#if defined WITH_CLOUD_CLIENT
+    Bound get_cloud_position_extrema_for_dof(size_t dof) const {
+        Bound extrema {std::numeric_limits<double>::infinity(), -std::numeric_limits<double>::infinity(), 0.0, 0.0};
+        bool finite = true;
+        const auto profiles = profiles_view();
+        const auto ends = times_view();
+        const auto consider = [&](double time, size_t section) {
+            if (!(0.0 <= time && time <= duration)) return;
+            const double position = position_at_time_for_dof(time, dof, section);
+            if (!std::isfinite(position)) { finite = false; return; }
+            if (position < extrema.min) { extrema.min = position; extrema.t_min = time; }
+            if (position > extrema.max) { extrema.max = position; extrema.t_max = time; }
+        };
+        for (size_t section = 0; section < profiles.size(); ++section) {
+            const double start = section == 0 ? 0.0 : ends[section - 1];
+            const double end = ends[section];
+            consider(start, section);
+            consider(end, section);
+            visit_sampling_steps(profiles[section][dof], end - start,
+                [&](double pre, double begin, double finish, double, double v, double a, double j) {
+                    if (!(begin < finish)) return false;
+                    const auto phase_time = [&](double time) { return (time - start) - pre; };
+                    const auto boundary_time = [&](double boundary) {
+                        double time = std::clamp(start + (pre + boundary), start, end);
+                        // The rounded sum seeds the search; use the sampler's
+                        // subtraction order to locate the exact transition.
+                        while (time < end && phase_time(time) < boundary) time = std::nextafter(time, end);
+                        while (time > start) {
+                            const double previous = std::nextafter(time, start);
+                            if (phase_time(previous) < boundary) break;
+                            time = previous;
+                        }
+                        return time;
+                    };
+                    const double lower = boundary_time(begin);
+                    const double upper = std::nextafter(boundary_time(finish), -std::numeric_limits<double>::infinity());
+                    if (lower > upper || !(lower < end) || phase_time(lower) < begin || phase_time(lower) >= finish) return false;
+                    consider(lower, section);
+                    consider(upper, section);
+                    for (double turn: roots::solve_quadratic_scaled(j / 2, a, v, finish - begin)) {
+                        const double time = start + (pre + (begin + turn));
+                        if (lower <= time && time <= upper) {
+                            consider(time, section);
+                            const double before = std::nextafter(time, lower);
+                            const double after = std::nextafter(time, upper);
+                            consider(before, section);
+                            consider(after, section);
+                        }
+                    }
+                    return false;
+                });
+        }
+        if (!finite) extrema.min = extrema.max = std::numeric_limits<double>::quiet_NaN();
+        return extrema;
+    }
+#endif
+
     Bound get_position_extrema_for_dof(size_t dof) const {
+#if defined WITH_CLOUD_CLIENT
+        if (!independent_min_durations_available) return get_cloud_position_extrema_for_dof(dof);
+#endif
         const auto profiles = profiles_view();
         const auto cumulative_times = times_view();
         Bound extrema {std::numeric_limits<double>::infinity(), -std::numeric_limits<double>::infinity(), 0.0, 0.0};
@@ -541,29 +622,12 @@ private:
             const double start = i == 0 ? 0.0 : ends[i - 1];
             const double end = ends[i];
             const auto& profile = profiles[i][dof];
-            if (profile.brake.duration > 0.0) {
-                const auto& brake = profile.brake;
-                if (brake.t[0] > 0.0) {
-                    if (auto time = query_step(start, end, 0.0, 0.0, std::min(brake.t[0], brake.duration),
-                        brake.p[0], brake.v[0], brake.a[0], brake.j[0])) return time;
-                }
-                if (brake.t[0] < brake.duration) {
-                    if (auto time = query_step(start, end, 0.0, brake.t[0], brake.duration,
-                        brake.p[1], brake.v[1], brake.a[1], brake.j[1])) return time;
-                }
-            }
-            // Sampling selects phases by t_sum rather than the raw durations.
-            // Cloud responses can contain distinct supports for the two fields.
-            double phase_start = 0.0;
-            for (size_t phase = 0; phase < 7; ++phase) {
-                if (phase_start < profile.t_sum[phase]) {
-                    if (auto time = query_step(start, end, profile.brake.duration, phase_start, profile.t_sum[phase],
-                        profile.p[phase], profile.v[phase], profile.a[phase], profile.j[phase])) return time;
-                }
-                phase_start = profile.t_sum[phase];
-            }
-            if (auto time = query_step(start, end, profile.brake.duration, phase_start, end - start - profile.brake.duration,
-                profile.p.back(), profile.v.back(), profile.a.back(), 0.0)) return time;
+            std::optional<double> crossing;
+            visit_sampling_steps(profile, end - start, [&](double pre, double begin, double finish, double p, double v, double a, double j) {
+                crossing = query_step(start, end, pre, begin, finish, p, v, a, j);
+                return crossing.has_value();
+            });
+            if (crossing) return crossing;
         }
         return matches(duration) ? std::optional<double>(duration) : std::nullopt;
     }

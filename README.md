@@ -246,7 +246,7 @@ In C++/Python, `get_first_time_at_position(dof, position, time_after=0.0)` retur
 
 `at_times` accepts finite times in any order and preserves ordinary sampling and extrapolation results. Each batch keeps a private section hint, avoiding repeated binary searches for dense neighboring samples. The hint belongs only to that call; trajectories carry no mutable sampling cursor.
 
-Position-extrema timestamps stay within the trajectory's `[0, duration]` window, including when cumulative section timing rounds at a boundary.
+Position-extrema timestamps stay within the trajectory's `[0, duration]` window, including when cumulative section timing rounds at a boundary. Cloud extrema and position-limit checks follow the sampled phase/braking supports and logical sections, including truncated phases and discontinuous boundary states.
 
 For local state-to-state calculations, disabled axes extrapolate from the supplied current state at constant acceleration, including negative sampling times.
 
