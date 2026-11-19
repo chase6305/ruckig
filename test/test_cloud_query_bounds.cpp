@@ -262,6 +262,39 @@ TEST_CASE("cloud queries retain rounded positions beside discontinuous cubic bou
     }
 }
 
+TEST_CASE("cloud queries and extrema condition turning points on truncated supports") {
+    const double turn = 0.5 - std::sqrt(3.0) / 12.0;
+    for (double sign: {-1.0, 1.0}) {
+        for (double raw_duration: {1000.0, 1e200}) {
+            auto profile = query_phase(-sign * 0.09375, sign * 0.6875, -3 * sign, 6 * sign, 1.0);
+            profile.t[3] = raw_duration;
+            for (size_t step = 3; step < 7; ++step) profile.t_sum[step] = raw_duration;
+            profile.p.back() = profile.v.back() = profile.a.back() = profile.pf = profile.vf = profile.af = 0.0;
+            const auto trajectory = decoded_query_trajectory({profile}, {0.5});
+            double position;
+            trajectory.at_time(0.35, position);
+            for (double after: {0.0, 0.3}) {
+                const auto crossing = trajectory.get_first_time_at_position(0, position, after);
+                REQUIRE(crossing.has_value());
+                CHECK(*crossing >= after);
+                CHECK(*crossing <= 0.35 + 1e-8);
+                double actual;
+                trajectory.at_time(*crossing, actual);
+                CHECK(std::abs(actual - position) < 1e-9);
+            }
+            std::array<Bound, 1> extrema;
+            trajectory.get_position_extrema(extrema);
+            double expected;
+            trajectory.at_time(turn, expected);
+            CHECK((sign > 0 ? extrema[0].max : extrema[0].min) == doctest::Approx(expected).epsilon(1e-12).scale(0.0));
+            CHECK((sign > 0 ? extrema[0].t_max : extrema[0].t_min) == doctest::Approx(turn).epsilon(1e-12));
+            const double infinity = std::numeric_limits<double>::infinity();
+            const std::array<double, 2> bounds = sign > 0 ? std::array{-infinity, 0.001} : std::array{-0.001, infinity};
+            decoded_query_trajectory({profile}, {0.5}, bounds, Result::ErrorPositionalLimits);
+        }
+    }
+}
+
 TEST_CASE("cloud query windows include zero-duration responses") {
     const auto zero = query_phase(7.0, 0.0, 0.0, 0.0, 0.0);
     const auto trajectory = decoded_query_trajectory({zero, zero}, {0.0, 0.0});

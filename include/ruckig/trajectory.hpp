@@ -274,7 +274,10 @@ class Trajectory {
                     }
                     around(lower, lower, upper);
                     around(upper, lower, upper);
-                    for (double turn: roots::solve_quadratic_scaled(j / 2, a, v, finish - begin)) {
+                    // A raw cloud support may greatly exceed its logical
+                    // section; condition turning points on sampled times.
+                    const double time_scale = std::max(0.0, ((upper - start) - pre) - begin);
+                    for (double turn: roots::solve_quadratic_scaled(j / 2, a, v, time_scale)) {
                         const double time = start + (pre + (begin + turn));
                         if (lower <= time && time <= upper) around(time, lower, upper);
                     }
@@ -597,9 +600,10 @@ private:
             // Search monotone pieces in time order. Conditioning alone cannot
             // distinguish every near-multiple cubic root; a bracket also lets
             // us refine a candidate against actual floating-point sampling.
+            const double time_scale = std::max(0.0, local_time(upper));
             std::array<double, 4> boundaries {lower, upper};
             size_t boundary_count = 2;
-            for (double turn: roots::solve_quadratic_scaled(j / 2, a, v, end - begin)) {
+            for (double turn: roots::solve_quadratic_scaled(j / 2, a, v, time_scale)) {
                 const double time = root_time(turn);
                 if (lower < time && time < upper) boundaries[boundary_count++] = time;
             }
@@ -633,7 +637,7 @@ private:
                     // Prefer conditioned roots for small/fast motion. The
                     // unscaled fallback can retain a small crossing within an
                     // enormous cloud phase whose full-interval scale loses it.
-                    try_roots(roots::solve_cubic_scaled(j / 6, a / 2, v, p - position, end - begin));
+                    try_roots(roots::solve_cubic_scaled(j / 6, a / 2, v, p - position, time_scale));
                     if (!first) try_roots(roots::solve_cubic(j / 6, a / 2, v, p - position));
                     if (first) return first;
                     for (size_t iteration = 0; iteration < 80; ++iteration) {
