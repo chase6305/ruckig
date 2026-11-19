@@ -284,6 +284,37 @@ TEST_CASE("position queries match native sampling across spatial and temporal sc
     }
 }
 
+TEST_CASE("position queries retain representable crossings beside rounded analytic roots") {
+    for (const auto& motion: std::array<std::array<double, 3>, 3> {{{-33515968.441566069, -94759388.733532175, 1.3},
+        {6765946.0181921376, 80596563.632967055, 0.4}, {65740835.480148509, -21760337.2967779, 1.6}}}) {
+        const auto [position, velocity, time] = motion;
+        CAPTURE(position);
+        CAPTURE(velocity);
+        CAPTURE(time);
+        InputParameter<1> input;
+        input.current_position = {position};
+        input.target_position = {position + 2 * velocity};
+        input.current_velocity = input.target_velocity = {velocity};
+        input.max_velocity = {std::abs(velocity)};
+        input.max_acceleration = {1.0};
+        input.max_jerk = {0.0};
+        Ruckig<1> solver;
+        Trajectory<1> trajectory;
+        REQUIRE(solver.calculate(input, trajectory) == Result::Working);
+        double sampled;
+        trajectory.at_time(time, sampled);
+        for (double after: {0.0, 0.5 * time}) {
+            const auto crossing = trajectory.get_first_time_at_position(0, sampled, after);
+            REQUIRE(crossing.has_value());
+            CHECK(*crossing >= after);
+            CHECK(*crossing <= trajectory.get_duration());
+            double actual;
+            trajectory.at_time(*crossing, actual);
+            CHECK(std::abs(actual - sampled) < 1e-9);
+        }
+    }
+}
+
 TEST_CASE("position queries retain sampled positions on deterministic scaled coupled motion") {
     std::mt19937 generator(20261119);
     std::uniform_real_distribution<double> unit(0.0, 1.0);

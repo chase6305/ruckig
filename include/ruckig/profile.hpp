@@ -459,7 +459,7 @@ public:
     }
 
     Bound get_position_extrema() const {
-        // Disabled and stationary DoFs only initialize the terminal state.
+        // Zero-duration profiles use the stored terminal state.
         if (t_sum.back() == 0.0 && brake.duration == 0.0) {
             return Bound{p.back(), p.back(), 0.0, 0.0};
         }

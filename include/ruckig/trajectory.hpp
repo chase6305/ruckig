@@ -460,10 +460,21 @@ private:
                 const double time = section_start + (pre + (begin + root));
                 return std::isnan(time) ? time : std::clamp(time, lower, upper);
             };
+            const auto nearby_match = [&](double time, double left, double right) -> std::optional<double> {
+                if (!std::isfinite(time)) return std::nullopt;
+                if (left <= time && time <= right && consider_time(time)) return time;
+                // Inverting the rounded position and adding phase/section
+                // offsets can move a representable crossing by one ULP.
+                for (double direction: {-std::numeric_limits<double>::infinity(), std::numeric_limits<double>::infinity()}) {
+                    const double adjacent = std::nextafter(time, direction);
+                    if (left <= adjacent && adjacent <= right && consider_time(adjacent)) return adjacent;
+                }
+                return std::nullopt;
+            };
             if (j == 0.0 && a == 0.0) {
                 if (v != 0.0) {
                     const double candidate = root_time((position - p) / v);
-                    if (std::isfinite(candidate) && consider_time(candidate)) return candidate;
+                    if (auto match = nearby_match(candidate, lower, upper)) return match;
                 }
                 return consider_time(upper) ? std::optional<double>(upper) : std::nullopt;
             }
@@ -487,7 +498,7 @@ private:
                     const auto try_roots = [&](auto candidates) {
                         for (double root: candidates) {
                             const double candidate = root_time(root);
-                            if (left <= candidate && candidate <= right && (!first || candidate < *first) && consider_time(candidate)) first = candidate;
+                            if (auto match = nearby_match(candidate, left, right); match && (!first || *match < *first)) first = match;
                         }
                     };
                     // Prefer conditioned roots for small/fast motion. The
@@ -515,8 +526,8 @@ private:
                         if ((p_left < p_right) == (p_middle < position)) left = middle;
                         else right = middle;
                     }
-                    if (consider_time(left)) return left;
-                    if (consider_time(right)) return right;
+                    if (auto match = nearby_match(left, boundaries[part - 1], boundaries[part])) return match;
+                    if (auto match = nearby_match(right, boundaries[part - 1], boundaries[part])) return match;
                 }
                 if (consider_time(boundaries[part])) return boundaries[part];
             }
