@@ -1,5 +1,6 @@
 #include <doctest/doctest.h>
 
+#include <algorithm>
 #include <array>
 #include <cmath>
 #include <limits>
@@ -293,6 +294,29 @@ TEST_CASE("cloud queries and extrema condition turning points on truncated suppo
             decoded_query_trajectory({profile}, {0.5}, bounds, Result::ErrorPositionalLimits);
         }
     }
+}
+
+TEST_CASE("cloud batches preserve discontinuous and zero-duration sections in both directions") {
+    const auto trajectory = decoded_query_trajectory({query_phase(0.0, 1.0, 0.0, 0.0, 1.0),
+        query_phase(99.0, 0.0, 0.0, 0.0, 0.0), query_phase(10.0, 1.0, 0.0, 0.0, 1.0),
+        query_phase(777.0, 0.0, 0.0, 0.0, 0.0), query_phase(20.0, 1.0, 0.0, 0.0, 1.0)}, {1.0, 1.0, 2.0, 2.0, 3.0});
+    std::vector<double> times {3.0, 2.9, 2.0, 1.9, 1.1, 1.0, 0.9, 0.0, -0.1, 3.1, 3.0, 2.9, 0.0, 2.1, 1.2};
+    for (bool reverse: {false, true}) {
+        if (reverse) std::reverse(times.begin(), times.end());
+        std::vector<std::array<double, 1>> positions(times.size()), velocities(times.size()), accelerations(times.size());
+        trajectory.at_times(times, positions, velocities, accelerations);
+        for (size_t i = 0; i < times.size(); ++i) {
+            std::array<double, 1> p, v, a;
+            trajectory.at_time(times[i], p, v, a);
+            CHECK(positions[i] == p);
+            CHECK(velocities[i] == v);
+            CHECK(accelerations[i] == a);
+        }
+    }
+    std::array<Bound, 1> extrema;
+    trajectory.get_position_extrema(extrema);
+    CHECK(extrema[0].min == 0.0);
+    CHECK(extrema[0].max == 21.0);
 }
 
 TEST_CASE("cloud query windows include zero-duration responses") {

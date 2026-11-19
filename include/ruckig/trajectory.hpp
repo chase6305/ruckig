@@ -118,7 +118,7 @@ class Trajectory {
     }
 
     //! Calculates the base values to then integrate from
-    template<bool use_section_hint = false, typename Func>
+    template<bool use_section_hint = false, bool prefer_reverse_hint = false, typename Func>
     void state_to_integrate_from(double time, size_t& new_section, Func&& set_integrate) const {
         if (!calculated || !has_valid_profile_structure() || !std::isfinite(time)) {
             throw RuckigError("trajectory sampling requires a calculated trajectory, matching dimensions, and a finite time.");
@@ -142,6 +142,19 @@ class Trajectory {
             if (profiles.size() == 1) {
                 new_section = 0;
                 section_found = true;
+            } else if constexpr (prefer_reverse_hint) {
+                if (new_section < profiles.size() && time < cumulative_times[new_section]) {
+                    if (new_section == 0 || cumulative_times[new_section - 1] <= time) {
+                        section_found = true;
+                    } else if (new_section == 1 || cumulative_times[new_section - 2] <= time) {
+                        --new_section;
+                        section_found = true;
+                    }
+                } else if (new_section == profiles.size() && new_section > 0
+                    && (new_section == 1 || cumulative_times[new_section - 2] <= time)) {
+                    --new_section;
+                    section_found = true;
+                }
             } else if (new_section < profiles.size() && (new_section == 0 || cumulative_times[new_section - 1] <= time)) {
                 if (time < cumulative_times[new_section]) {
                     section_found = true;
@@ -163,6 +176,19 @@ class Trajectory {
         for (size_t dof = 0; dof < degrees_of_freedom; ++dof) {
             state_to_integrate_from_profile(profiles[new_section][dof], t_diff,
                 [&](double t, double p, double v, double a, double j) { set_integrate(dof, t, p, v, a, j); });
+        }
+    }
+
+    template<bool reverse, class Times, class States>
+    void at_times_impl(const Times& times, States& positions, States& velocities, States& accelerations) const {
+        size_t section = 0;
+        for (size_t i = 0; i < times.size(); ++i) {
+            if (positions[i].size() != degrees_of_freedom || velocities[i].size() != degrees_of_freedom || accelerations[i].size() != degrees_of_freedom) {
+                throw RuckigError("mismatch in degrees of freedom (vector size).");
+            }
+            state_to_integrate_from<true, reverse>(times[i], section, [&](size_t dof, double t, double p, double v, double a, double j) {
+                std::tie(positions[i][dof], velocities[i][dof], accelerations[i][dof]) = integrate(t, p, v, a, j);
+            });
         }
     }
 
@@ -457,17 +483,12 @@ public:
         if (positions.size() != times.size() || velocities.size() != times.size() || accelerations.size() != times.size()) {
             throw RuckigError("mismatch in number of samples (vector size).");
         }
-        // A hint belongs to this call only, so copies and concurrent readers do
-        // not share mutable cursor state. Large jumps and backward times retain
-        // the ordinary binary search; dense forward samples reuse the section.
-        size_t section = 0;
-        for (size_t i = 0; i < times.size(); ++i) {
-            if (positions[i].size() != degrees_of_freedom || velocities[i].size() != degrees_of_freedom || accelerations[i].size() != degrees_of_freedom) {
-                throw RuckigError("mismatch in degrees of freedom (vector size).");
-            }
-            state_to_integrate_from<true>(times[i], section, [&](size_t dof, double t, double p, double v, double a, double j) {
-                std::tie(positions[i][dof], velocities[i][dof], accelerations[i][dof]) = integrate(t, p, v, a, j);
-            });
+        // Choose a preferred direction from this batch's endpoints. Mixed
+        // time order retains binary-search fallback, with no shared cursor.
+        if (times.size() > 1 && static_cast<double>(times[times.size() - 1]) < static_cast<double>(times[0])) {
+            at_times_impl<true>(times, positions, velocities, accelerations);
+        } else {
+            at_times_impl<false>(times, positions, velocities, accelerations);
         }
     }
 

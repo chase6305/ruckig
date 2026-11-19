@@ -15,6 +15,12 @@
 using namespace ruckig;
 
 namespace {
+struct SamplingTime {
+    double value;
+    operator double() const { return value; }
+    bool operator<(const SamplingTime&) const = delete;
+};
+
 // No iterators or contiguous storage: batch sampling needs only size and index.
 template<class T, size_t N>
 class SamplingVector {
@@ -162,6 +168,20 @@ TEST_CASE("batch sampling validates buffers and preserves empty-batch behavior")
     trajectory.at_times(times, ps, vs, as);
     CHECK(pb[0] == 0.0);
     CHECK(pb[1] == 0.0);
+
+    // Time elements need conversion to double, without their own ordering API.
+    const std::array<SamplingTime, 2> converted_times {{{1.0}, {0.0}}};
+    std::array<std::array<double, 2>, 2> converted_p, converted_v, converted_a;
+    trajectory.at_times(converted_times, converted_p, converted_v, converted_a);
+    for (size_t i = 0; i < converted_times.size(); ++i) {
+        std::vector<double> ep(2), ev(2), ea(2);
+        trajectory.at_time(converted_times[i], ep, ev, ea);
+        for (size_t dof = 0; dof < 2; ++dof) {
+            CHECK(converted_p[i][dof] == ep[dof]);
+            CHECK(converted_v[i][dof] == ev[dof]);
+            CHECK(converted_a[i][dof] == ea[dof]);
+        }
+    }
 }
 
 TEST_CASE("disabled axes extrapolate their current state before and after the trajectory") {
