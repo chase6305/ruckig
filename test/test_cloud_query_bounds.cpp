@@ -30,8 +30,8 @@ Profile query_phase(double p, double v, double a, double j, double duration) {
 }
 
 // Exercise the production post/decoder using structurally accepted responses.
-// Phase supports can extend beyond logical sections; only global query bounds
-// and root fallback behavior are asserted here.
+// Phase supports can differ from logical sections. Queries must use the same
+// time supports as production sampling, including closed terminal boundaries.
 Trajectory<1> decoded_query_trajectory(const std::vector<Profile>& profiles, const std::vector<double>& ends) {
     std::vector<std::array<Profile, 1>> rows;
     for (const auto& profile: profiles) rows.push_back({profile});
@@ -63,22 +63,31 @@ TEST_CASE("cloud query bounds validate clamped roots against the sampled boundar
     CHECK(truncated.get_first_time_at_position(0, 0.25) == std::optional<double>(0.25));
 }
 
-TEST_CASE("cloud query bounds retry later roots and endpoint fallbacks after a rejected clamp") {
+TEST_CASE("cloud query windows discard roots from sections before the lower bound") {
     const double prefix = std::ldexp(1.0, -53);
     const double after = std::nextafter(1.0, std::numeric_limits<double>::infinity());
     const auto later_root = decoded_query_trajectory({query_phase(0.0, 0.0, 0.0, 0.0, 0.0),
         query_phase(2.0, -3.0, 2.0, 0.0, 3.0), query_phase(9.0, 0.0, 0.0, 0.0, 0.0)}, {prefix, 0.5, 4.0});
-    CHECK(later_root.get_first_time_at_position(0, 0.0, after) == std::optional<double>(2.0));
+    CHECK_FALSE(later_root.get_first_time_at_position(0, 0.0, after).has_value());
+    double sampled;
+    later_root.at_time(2.0, sampled);
+    CHECK(sampled == 9.0);
 
     const auto endpoint = decoded_query_trajectory({query_phase(0.0, 0.0, 0.0, 0.0, 0.0),
         query_phase(0.0, 1e-16, -2e-16, 0.0, 2.0), query_phase(9.0, 0.0, 0.0, 0.0, 0.0)}, {prefix, 0.5, 4.0});
-    CHECK(endpoint.get_first_time_at_position(0, 0.0, after) == std::optional<double>(2.0));
+    CHECK_FALSE(endpoint.get_first_time_at_position(0, 0.0, after).has_value());
 
     const double duration = 1000.0;
     const auto tiny = query_phase(0.0, 0.0, 0.0, 1e-17, duration);
     const double end = std::nextafter(duration, 0.0);
     const auto terminal = decoded_query_trajectory({tiny}, {end});
-    CHECK(terminal.get_first_time_at_position(0, tiny.pf) == std::optional<double>(end));
+    const auto crossing = terminal.get_first_time_at_position(0, tiny.pf);
+    REQUIRE(crossing.has_value());
+    CHECK(*crossing >= 0.0);
+    CHECK(*crossing <= end);
+    CHECK(*crossing == doctest::Approx(end));
+    terminal.at_time(*crossing, sampled);
+    CHECK(std::abs(sampled - tiny.pf) < 1e-9);
 }
 
 TEST_CASE("cloud query bounds validate a finite boundary after phase-time overflow") {
@@ -91,7 +100,66 @@ TEST_CASE("cloud query bounds validate a finite boundary after phase-time overfl
     const auto crossing = trajectory.get_first_time_at_position(0, 1.0, 0.5);
     REQUIRE(crossing.has_value());
     CHECK(std::isfinite(*crossing));
-    CHECK(*crossing == 2.0);
+    CHECK(*crossing == 1.0);
+}
+
+TEST_CASE("cloud position queries follow logical sections and sampled phase boundaries") {
+    const auto truncated = decoded_query_trajectory({query_phase(0.0, 1.0, 0.0, 0.0, 2.0),
+        query_phase(10.0, 0.0, 0.0, 0.0, 0.0)}, {0.5, 2.0});
+    CHECK_FALSE(truncated.get_first_time_at_position(0, 1.0).has_value());
+    CHECK(truncated.get_first_time_at_position(0, 0.25) == std::optional<double>(0.25));
+    CHECK(truncated.get_first_time_at_position(0, 10.0) == std::optional<double>(0.5));
+    CHECK(truncated.get_first_time_at_position(0, 10.0, 1.0) == std::optional<double>(1.0));
+
+    auto phase = query_phase(0.0, 1.0, 0.0, 0.0, 1.0);
+    phase.t.fill(0.0);
+    phase.t_sum.fill(1.0);
+    phase.p.fill(9.0);
+    phase.p[0] = 0.0;
+    phase.p.back() = phase.pf = 1.0;
+    phase.v.fill(0.0);
+    phase.v[0] = 1.0;
+    const auto different_supports = decoded_query_trajectory({phase}, {1.0});
+    CHECK(different_supports.get_first_time_at_position(0, 0.5) == std::optional<double>(0.5));
+}
+
+TEST_CASE("cloud position queries use the sampled brake duration and terminal state") {
+    auto profile = query_phase(2.0, 1.0, 0.0, 0.0, 1.0);
+    profile.brake.duration = 2.0;
+    profile.brake.t = {0.25, 0.25};
+    profile.brake.p = {0.0, 0.25};
+    profile.brake.v = {1.0, 1.0};
+    const auto braking = decoded_query_trajectory({profile}, {3.0});
+    CHECK(braking.get_first_time_at_position(0, 1.0) == std::optional<double>(1.0));
+    CHECK(braking.get_first_time_at_position(0, 2.5) == std::optional<double>(2.5));
+
+    const auto terminal = decoded_query_trajectory({query_phase(0.0, 0.0, 0.0, 6.0, 2.0)}, {0.5});
+    CHECK(terminal.get_first_time_at_position(0, 3.5) == std::optional<double>(0.5));
+    CHECK_FALSE(terminal.get_first_time_at_position(0, 1.0).has_value());
+}
+
+TEST_CASE("position queries distinguish close cubic crossings in time order") {
+    const double amplitude = std::ldexp(1.0, 30), delta = std::ldexp(1.0, -12);
+    // A * (t - 1/2) * ((t - 1/2)^2 - delta^2), with exactly
+    // representable coefficients and three nearby, representable crossings.
+    const auto phase = query_phase(amplitude * (-0.125 + 0.5 * delta * delta),
+        amplitude * (0.75 - delta * delta), -3.0 * amplitude, 6.0 * amplitude, 1.0);
+    const auto trajectory = decoded_query_trajectory({phase}, {1.0});
+    for (const auto& window: std::array<std::array<double, 2>, 3> {{{0.49, 0.5 - delta}, {0.4998, 0.5}, {0.5001, 0.5 + delta}}}) {
+        const auto crossing = trajectory.get_first_time_at_position(0, 0.0, window[0]);
+        REQUIRE(crossing.has_value());
+        CHECK(*crossing == doctest::Approx(window[1]).epsilon(1e-9));
+        double position;
+        trajectory.at_time(*crossing, position);
+        CHECK(std::abs(position) < 1e-9);
+    }
+    CHECK_FALSE(trajectory.get_first_time_at_position(0, 0.0, 0.5003).has_value());
+}
+
+TEST_CASE("position queries retain small crossings inside enormous cloud phases") {
+    const auto trajectory = decoded_query_trajectory({query_phase(0.0, 0.0, 1.0, 0.0, 1e100)}, {1e100});
+    CHECK(trajectory.get_first_time_at_position(0, 0.5) == std::optional<double>(1.0));
+    CHECK(trajectory.get_first_time_at_position(0, 2.0) == std::optional<double>(2.0));
 }
 
 TEST_CASE("cloud query windows include zero-duration responses") {

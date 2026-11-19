@@ -76,6 +76,7 @@ if(BUILD_TESTS)
   target_sources(test-local-waypoints PRIVATE test/test_section_durations.cpp)
   target_sources(test-local-waypoints PRIVATE test/test_reference_fallback.cpp)
   target_sources(test-local-waypoints PRIVATE test/test_position_queries.cpp)
+  target_sources(test-local-waypoints PRIVATE test/test_batch_sampling.cpp)
   target_sources(test-local-waypoints PRIVATE test/test_waypoint_refinement.cpp)
   target_link_libraries(test-local-waypoints PRIVATE test-dependencies)
   add_test(NAME test-local-waypoints COMMAND test-local-waypoints)
@@ -115,8 +116,10 @@ endif()
 
 if(BUILD_BENCHMARK)
   add_executable(benchmark-target test/benchmark_target.cpp)
+  add_executable(benchmark-trajectory test/benchmark_trajectory.cpp)
 
   target_link_libraries(benchmark-target PRIVATE ruckig)
+  target_link_libraries(benchmark-trajectory PRIVATE ruckig)
 endif()
 
 

@@ -437,13 +437,21 @@ public:
 
         if (j != 0) {
             const double D = a * a - 2 * j * v;
-            if (std::abs(D) < std::numeric_limits<double>::epsilon()) {
+            if (!std::isfinite(D) || (D == 0.0 && a * a == 0.0 && v != 0.0)) {
+                for (double turn: roots::solve_quadratic_scaled(j / 2, a, v, t)) {
+                    check_position_extremum(turn, t_sum, t, p, v, a, j, ext);
+                }
+            } else if (D == 0.0) {
                 check_position_extremum(-a / j, t_sum, t, p, v, a, j, ext);
 
             } else if (D > 0.0) {
                 const double D_sqrt = std::sqrt(D);
-                check_position_extremum((-a - D_sqrt) / j, t_sum, t, p, v, a, j, ext);
-                check_position_extremum((-a + D_sqrt) / j, t_sum, t, p, v, a, j, ext);
+                // The two roots remain distinct even when the dimensional
+                // discriminant is tiny. Recover the second root by their
+                // product to avoid cancellation in -a +/- sqrt(D).
+                const double q = -a - std::copysign(D_sqrt, a);
+                check_position_extremum(q / j, t_sum, t, p, v, a, j, ext);
+                check_position_extremum(2 * v / q, t_sum, t, p, v, a, j, ext);
             }
         } else if (a != 0.0) {
             check_position_extremum(-v / a, t_sum, t, p, v, a, j, ext);
@@ -455,17 +463,14 @@ public:
         if (t_sum.back() == 0.0 && brake.duration == 0.0) {
             return Bound{p.back(), p.back(), 0.0, 0.0};
         }
-        Bound extrema;
-        extrema.min = std::numeric_limits<double>::infinity();
-        extrema.max = -std::numeric_limits<double>::infinity();
+        Bound extrema {std::numeric_limits<double>::infinity(), -std::numeric_limits<double>::infinity(), 0.0, 0.0};
 
         if (brake.duration > 0.0) {
             if (brake.t[0] > 0.0) {
                 check_step_for_position_extremum(0.0, brake.t[0], brake.p[0], brake.v[0], brake.a[0], brake.j[0], extrema);
-
-                if (brake.t[1] > 0.0) {
-                    check_step_for_position_extremum(brake.t[0], brake.t[1], brake.p[1], brake.v[1], brake.a[1], brake.j[1], extrema);
-                }
+            }
+            if (brake.t[1] > 0.0) {
+                check_step_for_position_extremum(brake.t[0], brake.t[1], brake.p[1], brake.v[1], brake.a[1], brake.j[1], extrema);
             }
         }
 

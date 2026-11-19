@@ -4,6 +4,7 @@
 #include <algorithm>
 #include <cfloat>
 #include <cmath>
+#include <limits>
 
 
 namespace ruckig {
@@ -146,6 +147,67 @@ inline PositiveSet<double, 3> solve_cubic(double a, double b, double c, double d
         }
     }
     return roots;
+}
+
+// Condition a polynomial on the scale of a finite time interval. Powers of two
+// avoid overflowing intermediate time powers or discarding small derivatives
+// solely because their coefficients are below the unscaled solver's epsilon.
+inline bool scale_cubic(const std::array<double, 4>& coefficients, double time_scale,
+    std::array<double, 4>& scaled, int& time_exponent) {
+    if (!(time_scale > 0.0) || !std::isfinite(time_scale)) return false;
+    std::array<double, 4> mantissas {};
+    std::array<int, 4> exponents {};
+    std::frexp(time_scale, &time_exponent);
+    int common_exponent = std::numeric_limits<int>::min();
+    for (size_t i = 0; i < coefficients.size(); ++i) {
+        if (!std::isfinite(coefficients[i])) return false;
+        if (coefficients[i] != 0.0) {
+            mantissas[i] = std::frexp(coefficients[i], &exponents[i]);
+            exponents[i] += static_cast<int>(3 - i) * time_exponent;
+            common_exponent = std::max(common_exponent, exponents[i]);
+        }
+    }
+    if (common_exponent == std::numeric_limits<int>::min()) {
+        scaled.fill(0.0);
+        return true;
+    }
+    scaled.fill(0.0);
+    for (size_t i = 0; i < coefficients.size(); ++i) {
+        if (coefficients[i] != 0.0) scaled[i] = std::ldexp(mantissas[i], exponents[i] - common_exponent);
+    }
+    return true;
+}
+
+inline PositiveSet<double, 3> solve_cubic_scaled(double a, double b, double c, double d, double time_scale) {
+    PositiveSet<double, 3> result;
+    std::array<double, 4> scaled;
+    int time_exponent;
+    if (!scale_cubic({a, b, c, d}, time_scale, scaled, time_exponent)) return result;
+    for (double root: solve_cubic(scaled[0], scaled[1], scaled[2], scaled[3])) {
+        result.insert(std::ldexp(root, time_exponent));
+    }
+    return result;
+}
+
+inline PositiveSet<double, 2> solve_quadratic_scaled(double a, double b, double c, double time_scale) {
+    PositiveSet<double, 2> result;
+    std::array<double, 4> scaled;
+    int time_exponent;
+    if (!scale_cubic({0.0, a, b, c}, time_scale, scaled, time_exponent)) return result;
+    a = scaled[1]; b = scaled[2]; c = scaled[3];
+    if (a == 0.0) {
+        if (b != 0.0) result.insert(std::ldexp(-c / b, time_exponent));
+        return result;
+    }
+    const double discriminant = std::fma(b, b, -4 * a * c);
+    if (discriminant == 0.0) {
+        result.insert(std::ldexp(-b / (2 * a), time_exponent));
+    } else if (discriminant > 0.0) {
+        const double q = -0.5 * (b + std::copysign(std::sqrt(discriminant), b));
+        result.insert(std::ldexp(q / a, time_exponent));
+        result.insert(std::ldexp(c / q, time_exponent));
+    }
+    return result;
 }
 
 // Solve resolvent eqaution of corresponding Quartic equation

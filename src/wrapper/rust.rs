@@ -378,6 +378,25 @@ pub struct Ruckig(UniquePtr<ffi::Ruckig>);
 mod tests {
     use super::*;
 
+    #[test]
+    fn small_discriminant_turning_point_enforces_position_bounds() {
+        let mut input = InputParameter::new(1);
+        input.current_velocity = vec![-1e-10];
+        input.target_position = vec![-2.4e-7];
+        input.target_velocity = vec![8e-11];
+        input.target_acceleration = vec![6e-14];
+        input.max_velocity = vec![1e-8];
+        input.max_acceleration = vec![1e-10];
+        input.max_jerk = vec![1e-17];
+        let mut otg = Ruckig::new_direct(1, 0.01);
+        let mut trajectory = Trajectory::new_direct(1);
+        assert_eq!(otg.calculate(&mut input, &mut trajectory), Result::Working);
+        let (position, _, _) = trajectory.at_time((2e7_f64).sqrt());
+        assert!(position[0] < -2.9e-7);
+        input.min_position = vec![-2.7e-7];
+        assert_eq!(otg.calculate(&mut input, &mut trajectory), Result::ErrorPositionalLimits);
+    }
+
     fn input() -> InputParameter {
         let mut input = InputParameter::new(1);
         input.target_position = vec![3.0];
