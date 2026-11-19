@@ -191,6 +191,13 @@ inline PositiveSet<double, 3> solve_cubic_scaled(double a, double b, double c, d
 
 inline PositiveSet<double, 2> solve_quadratic_scaled(double a, double b, double c, double time_scale) {
     PositiveSet<double, 2> result;
+    if (a == 0.0) {
+        if (b != 0.0 && std::isfinite(b) && std::isfinite(c) && time_scale > 0.0 && std::isfinite(time_scale)) result.insert(-c / b);
+        return result;
+    }
+    // A strictly positive (or negative) constant and coefficients of the same
+    // sign cannot have a nonnegative root, regardless of the time scale.
+    if ((a >= 0.0 && b >= 0.0 && c > 0.0) || (a <= 0.0 && b <= 0.0 && c < 0.0)) return result;
     std::array<double, 4> scaled;
     int time_exponent;
     if (!scale_cubic({0.0, a, b, c}, time_scale, scaled, time_exponent)) return result;

@@ -237,6 +237,31 @@ TEST_CASE("cloud extrema locate rounded phase transitions by the sampler compari
     CHECK(extrema[0].t_max == before);
 }
 
+TEST_CASE("cloud queries retain rounded positions beside discontinuous cubic boundaries") {
+    // Polynomial rounding can put a sampled endpoint just outside the range
+    // predicted by its two endpoint values. A brake offset also changes the
+    // first representable time assigned to the following phase.
+    for (const auto& sample: std::array<std::array<double, 7>, 2> {{{0.10227805119524325, 80.217829800419807,
+        -286712.47946829407, 372050822.14889216, 0.00073240674146955286, 0.0, 0.00073240674146955276},
+        {46987514.076945968, 39141076062.267738, -24654784027566.164, -34233938808884148.0,
+        0.00092974602222032059, 0.0018061664110114331, 0.0027359124332317531}}}) {
+        auto profile = query_phase(sample[0], sample[1], sample[2], sample[3], sample[4]);
+        profile.brake.duration = profile.brake.t[0] = sample[5];
+        profile.p.back() = profile.v.back() = profile.a.back() = profile.pf = profile.vf = profile.af = 0.0;
+        const auto trajectory = decoded_query_trajectory({profile}, {sample[4] + sample[5] + 0.001});
+        double position;
+        trajectory.at_time(sample[6], position);
+        const double after = 0.9 * sample[6];
+        const auto crossing = trajectory.get_first_time_at_position(0, position, after);
+        REQUIRE(crossing.has_value());
+        CHECK(*crossing >= after);
+        CHECK(*crossing <= trajectory.get_duration());
+        double actual;
+        trajectory.at_time(*crossing, actual);
+        CHECK(std::abs(actual - position) < 1e-9);
+    }
+}
+
 TEST_CASE("cloud query windows include zero-duration responses") {
     const auto zero = query_phase(7.0, 0.0, 0.0, 0.0, 0.0);
     const auto trajectory = decoded_query_trajectory({zero, zero}, {0.0, 0.0});

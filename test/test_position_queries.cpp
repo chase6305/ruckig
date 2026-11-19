@@ -252,6 +252,26 @@ TEST_CASE("position-query conditioning avoids intermediate time-power overflow a
     }
 }
 
+TEST_CASE("scaled velocity roots handle linear derivatives and consistent coefficient signs") {
+    for (const auto& coefficients: std::array<std::array<double, 4>, 3> {{{1e-300, -1.0, 1e300, 1e300},
+        {1e300, -1.0, 1e-300, 1e-300}, {-2.0, 1.0, 4.0, 0.5}}}) {
+        std::vector<double> turns;
+        for (double turn: roots::solve_quadratic_scaled(0.0, coefficients[0], coefficients[1], coefficients[2])) turns.push_back(turn);
+        REQUIRE(turns.size() == 1);
+        CHECK(turns[0] == doctest::Approx(coefficients[3]).epsilon(1e-12).scale(0.0));
+    }
+    for (double sign: {-1.0, 1.0}) {
+        size_t count = 0;
+        for ([[maybe_unused]] double turn: roots::solve_quadratic_scaled(sign, 2 * sign, sign, 1.0)) ++count;
+        CHECK(count == 0);
+    }
+    for (double invalid: {0.0, -1.0, std::numeric_limits<double>::infinity(), std::numeric_limits<double>::quiet_NaN()}) {
+        size_t count = 0;
+        for ([[maybe_unused]] double turn: roots::solve_quadratic_scaled(0.0, 1.0, -1.0, invalid)) ++count;
+        CHECK(count == 0);
+    }
+}
+
 TEST_CASE("position queries match native sampling across spatial and temporal scales") {
     Ruckig<1> solver;
     for (double space: {1e-4, 1.0, 1e4}) {

@@ -206,6 +206,33 @@ class Trajectory {
             profile.p.back(), profile.v.back(), profile.a.back(), 0.0);
     }
 
+    // Return the first active time and first following inactive time. Keeping
+    // the sampler's comparison order matters at rounded cumulative boundaries.
+    static bool sampling_step_time_bounds(double start, double end, double pre, double begin, double finish,
+        double& lower, double& upper) {
+        const auto phase_time = [&](double time) { return (time - start) - pre; };
+        const auto boundary_time = [&](double boundary) {
+            double time = std::clamp(start + (pre + boundary), start, end);
+            // With no brake offset, subtraction is exact at the origin or
+            // within a factor of two (Sterbenz's lemma). The rounded sum then
+            // needs at most one upward adjustment and no predecessor search.
+            if (pre == 0.0 && (start == 0.0 || time <= 2 * start)) {
+                if (time < end && time - start < boundary) time = std::nextafter(time, end);
+                return time;
+            }
+            while (time < end && phase_time(time) < boundary) time = std::nextafter(time, end);
+            while (time > start) {
+                const double previous = std::nextafter(time, start);
+                if (phase_time(previous) < boundary) break;
+                time = previous;
+            }
+            return time;
+        };
+        lower = boundary_time(begin);
+        upper = boundary_time(finish);
+        return lower < end && lower < upper && begin <= phase_time(lower) && phase_time(lower) < finish;
+    }
+
 #if defined WITH_CLOUD_CLIENT
     Bound get_cloud_position_extrema_for_dof(size_t dof) const {
         Bound extrema {std::numeric_limits<double>::infinity(), -std::numeric_limits<double>::infinity(), 0.0, 0.0};
@@ -222,38 +249,27 @@ class Trajectory {
         for (size_t section = 0; section < profiles.size(); ++section) {
             const double start = section == 0 ? 0.0 : ends[section - 1];
             const double end = ends[section];
+            const auto around = [&](double time, double lower, double upper) {
+                consider(time, section);
+                double before = time, after = time;
+                for (size_t neighbor = 0; neighbor < 4; ++neighbor) {
+                    if (before > lower) { before = std::nextafter(before, lower); consider(before, section); }
+                    if (after < upper) { after = std::nextafter(after, upper); consider(after, section); }
+                }
+            };
             consider(start, section);
             consider(end, section);
             visit_sampling_steps(profiles[section][dof], end - start,
                 [&](double pre, double begin, double finish, double, double v, double a, double j) {
                     if (!(begin < finish)) return false;
-                    const auto phase_time = [&](double time) { return (time - start) - pre; };
-                    const auto boundary_time = [&](double boundary) {
-                        double time = std::clamp(start + (pre + boundary), start, end);
-                        // The rounded sum seeds the search; use the sampler's
-                        // subtraction order to locate the exact transition.
-                        while (time < end && phase_time(time) < boundary) time = std::nextafter(time, end);
-                        while (time > start) {
-                            const double previous = std::nextafter(time, start);
-                            if (phase_time(previous) < boundary) break;
-                            time = previous;
-                        }
-                        return time;
-                    };
-                    const double lower = boundary_time(begin);
-                    const double upper = std::nextafter(boundary_time(finish), -std::numeric_limits<double>::infinity());
-                    if (lower > upper || !(lower < end) || phase_time(lower) < begin || phase_time(lower) >= finish) return false;
-                    consider(lower, section);
-                    consider(upper, section);
+                    double lower, upper;
+                    if (!sampling_step_time_bounds(start, end, pre, begin, finish, lower, upper)) return false;
+                    upper = std::nextafter(upper, -std::numeric_limits<double>::infinity());
+                    around(lower, lower, upper);
+                    around(upper, lower, upper);
                     for (double turn: roots::solve_quadratic_scaled(j / 2, a, v, finish - begin)) {
                         const double time = start + (pre + (begin + turn));
-                        if (lower <= time && time <= upper) {
-                            consider(time, section);
-                            const double before = std::nextafter(time, lower);
-                            const double after = std::nextafter(time, upper);
-                            consider(before, section);
-                            consider(after, section);
-                        }
+                        if (lower <= time && time <= upper) around(time, lower, upper);
                     }
                     return false;
                 });
@@ -515,15 +531,12 @@ private:
         const auto query_step = [&](double section_start, double section_end, double pre, double begin, double end,
             double p, double v, double a, double j) -> std::optional<double> {
             if (!(begin < end)) return std::nullopt;
-            if (j == 0.0 && a == 0.0) {
-                // Reject a disjoint linear support before timestamp arithmetic
-                // or division, which matters when scanning long cruise chains.
-                const double p_end = std::get<0>(integrate(end - begin, p, v, a, j));
-                const double minimum = std::min(p, p_end), maximum = std::max(p, p_end);
-                if ((position < minimum && minimum - position >= 1e-9) || (position > maximum && position - maximum >= 1e-9)) return std::nullopt;
+            double lower = std::max(earliest, section_start + (pre + begin));
+            double upper = std::min(section_end, section_start + (pre + end));
+            if (j != 0.0 || a != 0.0) {
+                if (!sampling_step_time_bounds(section_start, section_end, pre, begin, end, lower, upper)) return std::nullopt;
+                lower = std::max(earliest, lower);
             }
-            const double lower = std::max(earliest, section_start + (pre + begin));
-            const double upper = std::min(section_end, section_start + (pre + end));
             if (upper < lower) return std::nullopt;
             // Match the subtraction order used by time sampling. A section or
             // phase boundary need not survive addition/subtraction exactly.
@@ -541,23 +554,38 @@ private:
                 const double time = section_start + (pre + (begin + root));
                 return std::isnan(time) ? time : std::clamp(time, lower, upper);
             };
+            if (j == 0.0 && a == 0.0 && v != 0.0) {
+                const double candidate = root_time((position - p) / v);
+                if (std::isfinite(candidate) && consider_time(candidate)) return candidate;
+            }
             const auto nearby_match = [&](double time, double left, double right) -> std::optional<double> {
                 if (!std::isfinite(time)) return std::nullopt;
                 if (left <= time && time <= right && consider_time(time)) return time;
-                // Inverting the rounded position and adding phase/section
-                // offsets can move a representable crossing by one ULP.
-                for (double direction: {-std::numeric_limits<double>::infinity(), std::numeric_limits<double>::infinity()}) {
-                    const double adjacent = std::nextafter(time, direction);
-                    if (left <= adjacent && adjacent <= right && consider_time(adjacent)) return adjacent;
+                // Inverting a rounded polynomial and adding phase/section
+                // offsets can move a representable crossing by several ULPs.
+                double before = time, after = time;
+                for (size_t neighbor = 0; neighbor < 4; ++neighbor) {
+                    before = std::nextafter(before, -std::numeric_limits<double>::infinity());
+                    after = std::nextafter(after, std::numeric_limits<double>::infinity());
+                    if (left <= before && before <= right && consider_time(before)) return before;
+                    if (left <= after && after <= right && consider_time(after)) return after;
                 }
                 return std::nullopt;
             };
             if (j == 0.0 && a == 0.0) {
-                if (v != 0.0) {
-                    const double candidate = root_time((position - p) / v);
-                    if (auto match = nearby_match(candidate, lower, upper)) return match;
-                }
-                return consider_time(upper) ? std::optional<double>(upper) : std::nullopt;
+                const auto find_linear = [&]() -> std::optional<double> {
+                    if (v != 0.0) {
+                        const double candidate = root_time((position - p) / v);
+                        if (auto match = nearby_match(candidate, lower, upper)) return match;
+                    }
+                    return consider_time(upper) ? std::optional<double>(upper) : std::nullopt;
+                };
+                if (auto match = find_linear()) return match;
+                // Most cruise queries finish above. Locate exact phase bounds
+                // only when a rounded boundary prevents that direct solution.
+                if (!sampling_step_time_bounds(section_start, section_end, pre, begin, end, lower, upper)) return std::nullopt;
+                lower = std::max(earliest, lower);
+                return upper < lower ? std::nullopt : find_linear();
             }
             // Search monotone pieces in time order. Conditioning alone cannot
             // distinguish every near-multiple cubic root; a bracket also lets
@@ -573,13 +601,26 @@ private:
                 double left = boundaries[part - 1], right = boundaries[part];
                 const double p_left = std::get<0>(integrate(local_time(left), p, v, a, j));
                 const double p_right = std::get<0>(integrate(local_time(right), p, v, a, j));
+                const double minimum = std::min(p_left, p_right), maximum = std::max(p_left, p_right);
+                const bool within_range = minimum <= position && position <= maximum;
+                if (!within_range) {
+                    // Avoid searching neighboring times on unrelated phases.
+                    // Account for the nested polynomial's rounding near an
+                    // endpoint before rejecting its whole monotone support.
+                    const double t = std::max(std::abs(local_time(left)), std::abs(local_time(right)));
+                    const double tolerance = 1e-9 + 8 * std::numeric_limits<double>::epsilon()
+                        * (std::abs(p) + t * (std::abs(v) + t * (std::abs(a) / 2 + t * std::abs(j) / 6)));
+                    if ((position < minimum && minimum - position > tolerance) || (position > maximum && position - maximum > tolerance)) continue;
+                }
                 if (consider_time(left)) return left;
-                if (std::min(p_left, p_right) <= position && position <= std::max(p_left, p_right)) {
+                if (within_range) {
                     std::optional<double> first;
                     const auto try_roots = [&](auto candidates) {
                         for (double root: candidates) {
                             const double candidate = root_time(root);
-                            if (auto match = nearby_match(candidate, left, right); match && (!first || *match < *first)) first = match;
+                            if (left <= candidate && candidate <= right && consider_time(candidate)) {
+                                if (!first || candidate < *first) first = candidate;
+                            } else if (auto match = nearby_match(candidate, left, right); match && (!first || *match < *first)) first = match;
                         }
                     };
                     // Prefer conditioned roots for small/fast motion. The
@@ -610,7 +651,8 @@ private:
                     if (auto match = nearby_match(left, boundaries[part - 1], boundaries[part])) return match;
                     if (auto match = nearby_match(right, boundaries[part - 1], boundaries[part])) return match;
                 }
-                if (consider_time(boundaries[part])) return boundaries[part];
+                if (auto match = nearby_match(boundaries[part - 1], boundaries[part - 1], boundaries[part])) return match;
+                if (auto match = nearby_match(boundaries[part], boundaries[part - 1], boundaries[part])) return match;
             }
             return std::nullopt;
         };
@@ -624,6 +666,14 @@ private:
             const auto& profile = profiles[i][dof];
             std::optional<double> crossing;
             visit_sampling_steps(profile, end - start, [&](double pre, double begin, double finish, double p, double v, double a, double j) {
+                if (!(begin < finish)) return false;
+                if (j == 0.0 && a == 0.0) {
+                    // Keep disjoint cruise supports outside the root-search
+                    // call, so long chains skip them without its call frame.
+                    const double p_end = std::get<0>(integrate(finish - begin, p, v, a, j));
+                    const double minimum = std::min(p, p_end), maximum = std::max(p, p_end);
+                    if ((position < minimum && minimum - position >= 1e-9) || (position > maximum && position - maximum >= 1e-9)) return false;
+                }
                 crossing = query_step(start, end, pre, begin, finish, p, v, a, j);
                 return crossing.has_value();
             });

@@ -48,6 +48,22 @@ jobs:
       if: matrix.os != 'ubuntu-latest'
       run: ctest --test-dir ./build --build-config Release --output-on-failure
 
+    - name: Test sampling and position queries with FMA contraction
+      if: matrix.os == 'ubuntu-latest' && matrix.cmake_flags == ''
+      env:
+        OMP_NUM_THREADS: 1
+        OPENBLAS_NUM_THREADS: 1
+        MKL_NUM_THREADS: 1
+        NUMEXPR_NUM_THREADS: 1
+      run: |
+        if ! grep -qw fma /proc/cpuinfo; then
+          echo "FMA instructions are unavailable on this runner."
+          exit 0
+        fi
+        cmake -B build-fma -DCMAKE_BUILD_TYPE=Release -DCMAKE_CXX_FLAGS=-mfma -DBUILD_CLOUD_CLIENT=ON -DBUILD_SHARED_LIBS=OFF -DBUILD_TESTS=ON -DBUILD_EXAMPLES=OFF -DBUILD_BENCHMARK=OFF -DBUILD_PYTHON_MODULE=OFF
+        cmake --build build-fma --target test-local-waypoints test-cloud-client --parallel 2
+        ctest --test-dir build-fma --output-on-failure --parallel 1 -R 'test-local-waypoints|test-cloud-client'
+
     - name: Memory Test
       if: matrix.os == 'ubuntu-latest'
       run: |
