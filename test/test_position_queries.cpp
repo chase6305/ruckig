@@ -299,6 +299,29 @@ TEST_CASE("velocity roots preserve coefficient scales across wide time windows")
     }
 }
 
+TEST_CASE("velocity roots retain subnormal discriminants within wide time windows") {
+    for (int exponent: {-530, -537}) {
+        const double first = std::ldexp(1.0, exponent);
+        const double constant = std::ldexp(1.0, 2 * exponent + 1);
+        for (double sign: {-1.0, 1.0}) {
+            for (double horizon: {1e-200, 1.0, 1e200}) {
+                INFO("exponent: " << exponent << ", horizon: " << horizon << ", sign: " << sign);
+                std::vector<double> turns;
+                for (double turn: roots::solve_quadratic_scaled(sign, -3 * sign * first, sign * constant, horizon)) turns.push_back(turn);
+                REQUIRE(turns.size() == 2);
+                CHECK(turns[0] == doctest::Approx(first).epsilon(1e-12).scale(0.0));
+                CHECK(turns[1] == doctest::Approx(2 * first).epsilon(1e-12).scale(0.0));
+            }
+        }
+    }
+    for (double sign: {-1.0, 1.0}) {
+        std::vector<double> turns;
+        for (double turn: roots::solve_quadratic_scaled(-sign, 0.0, sign * 1e-318, 1e200)) turns.push_back(turn);
+        REQUIRE(turns.size() == 1);
+        CHECK(turns[0] == doctest::Approx(std::sqrt(1e-318)).epsilon(1e-12).scale(0.0));
+    }
+}
+
 TEST_CASE("position queries match native sampling across spatial and temporal scales") {
     Ruckig<1> solver;
     for (double space: {1e-4, 1.0, 1e4}) {

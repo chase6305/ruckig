@@ -210,45 +210,28 @@ inline PositiveSet<double, 2> solve_quadratic_scaled(double a, double b, double 
         }
         return result;
     }
-    // A common coefficient scale preserves small roots within a very long
-    // time window. Recover the original q before dividing when that retains
-    // a coefficient which the common scale rounded to zero.
-    const double magnitude = std::max({std::abs(a), std::abs(b), std::abs(c)});
-    if (magnitude > 0.0 && std::isfinite(magnitude)) {
-        int exponent;
-        std::frexp(magnitude, &exponent);
-        const double sa = std::ldexp(a, -exponent), sb = std::ldexp(b, -exponent), sc = std::ldexp(c, -exponent);
-        const double sd = std::fma(sb, sb, -4 * (sa * sc));
-        if (std::isfinite(sd) && std::abs(sd) >= std::numeric_limits<double>::min()) {
-            if (sd > 0.0) {
-                const double sq = -0.5 * (sb + std::copysign(std::sqrt(sd), sb));
-                const double q = std::ldexp(sq, exponent);
-                if (std::isfinite(q) && std::abs(q) >= std::numeric_limits<double>::min()) {
-                    result.insert(q / a);
-                    result.insert(c / q);
-                } else {
-                    result.insert(sq / sa);
-                    result.insert(sc / sq);
-                }
-            }
-            return result;
-        }
-    }
-    std::array<double, 4> scaled;
-    int time_exponent;
-    if (!scale_cubic({0.0, a, b, c}, time_scale, scaled, time_exponent)) return result;
-    a = scaled[1]; b = scaled[2]; c = scaled[3];
-    if (a == 0.0) {
-        if (b != 0.0) result.insert(std::ldexp(-c / b, time_exponent));
-        return result;
-    }
-    const double scaled_discriminant = std::fma(b, b, -4 * a * c);
-    if (scaled_discriminant == 0.0) {
-        result.insert(std::ldexp(-b / (2 * a), time_exponent));
-    } else if (scaled_discriminant > 0.0) {
-        const double q = -0.5 * (b + std::copysign(std::sqrt(scaled_discriminant), b));
-        result.insert(std::ldexp(q / a, time_exponent));
-        result.insert(std::ldexp(c / q, time_exponent));
+    // Normalize the discriminant products, rather than all coefficients or
+    // the time window. This retains early roots when a*c or b*b is subnormal,
+    // even if a and c are separated by the full floating-point exponent range.
+    if (!std::isfinite(a) || !std::isfinite(b) || !std::isfinite(c)) return result;
+    int ae, be, ce;
+    const double am = std::frexp(a, &ae), bm = std::frexp(b, &be), cm = std::frexp(c, &ce);
+    if (b == 0.0 && c == 0.0) { result.insert(0.0); return result; }
+    const int ac_exponent = ae + ce;
+    // Floor division for negative exponents keeps the product scale within
+    // one binary exponent of the square-root scale.
+    const int product_scale = ac_exponent >= 0 ? ac_exponent / 2 : (ac_exponent - 1) / 2;
+    const int scale = c == 0.0 ? be : (b == 0.0 ? product_scale : std::max(be, product_scale));
+    const double sb = std::ldexp(bm, be - scale);
+    const double ac = std::ldexp(am * cm, ac_exponent - 2 * scale);
+    const double sd = std::fma(sb, sb, -4 * ac);
+    if (sd < 0.0) return result;
+    if (sd == 0.0) {
+        result.insert(std::ldexp(-sb / (2 * am), scale - ae));
+    } else {
+        const double q = -0.5 * (sb + std::copysign(std::sqrt(sd), sb));
+        result.insert(std::ldexp(q / am, scale - ae));
+        result.insert(std::ldexp(cm / q, ce - scale));
     }
     return result;
 }
