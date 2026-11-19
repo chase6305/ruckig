@@ -162,6 +162,25 @@ TEST_CASE("position queries retain small crossings inside enormous cloud phases"
     CHECK(trajectory.get_first_time_at_position(0, 2.0) == std::optional<double>(2.0));
 }
 
+TEST_CASE("position queries refine crossings across very wide time ranges") {
+    for (const auto& sample: std::array<std::array<double, 3>, 2> {{{6e-300, 1e200, 1e100}, {6e300, 1.0, 1e-100}}}) {
+        const auto trajectory = decoded_query_trajectory({query_phase(0.0, 0.0, 0.0, sample[0], sample[1])}, {sample[1]});
+        double position;
+        trajectory.at_time(sample[2], position);
+        CHECK(position == doctest::Approx(1.0));
+        for (double after: {0.0, 0.5 * sample[2]}) {
+            const auto crossing = trajectory.get_first_time_at_position(0, position, after);
+            REQUIRE(crossing.has_value());
+            CHECK(*crossing >= after);
+            CHECK(*crossing <= trajectory.get_duration());
+            CHECK(*crossing == doctest::Approx(sample[2]).epsilon(1e-8).scale(0.0));
+            double actual;
+            trajectory.at_time(*crossing, actual);
+            CHECK(std::abs(actual - position) < 1e-9);
+        }
+    }
+}
+
 TEST_CASE("cloud query windows include zero-duration responses") {
     const auto zero = query_phase(7.0, 0.0, 0.0, 0.0, 0.0);
     const auto trajectory = decoded_query_trajectory({zero, zero}, {0.0, 0.0});

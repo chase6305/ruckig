@@ -497,8 +497,19 @@ private:
                     if (!first) try_roots(roots::solve_cubic(j / 6, a / 2, v, p - position));
                     if (first) return first;
                     for (size_t iteration = 0; iteration < 80; ++iteration) {
-                        const double middle = std::midpoint(left, right);
+                        double middle = std::midpoint(left, right);
                         if (middle == left || middle == right) break;
+                        // First narrow wide positive intervals in exponent
+                        // space; arithmetic halving can otherwise use every
+                        // iteration before reaching a crossing near zero.
+                        if (left == 0.0 || right / 2 > left) {
+                            constexpr int smallest_exponent = std::numeric_limits<double>::min_exponent - std::numeric_limits<double>::digits;
+                            const int left_exponent = left > 0.0 ? std::ilogb(left) : smallest_exponent;
+                            const int right_exponent = std::ilogb(right);
+                            if (right_exponent - left_exponent > 1) {
+                                middle = std::ldexp(1.0, (left_exponent + right_exponent) / 2);
+                            }
+                        }
                         if (consider_time(middle)) return middle;
                         const double p_middle = std::get<0>(integrate(local_time(middle), p, v, a, j));
                         if ((p_left < p_right) == (p_middle < position)) left = middle;
