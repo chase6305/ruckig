@@ -83,6 +83,40 @@ class Trajectory {
     }
 #endif
 
+    template<typename Func>
+    static void state_to_integrate_from_profile(const Profile& p, double t_diff_dof, Func&& set_integrate) {
+        // Brake pre-trajectory
+        if (p.brake.duration > 0) {
+            if (t_diff_dof < p.brake.duration) {
+                const size_t index = (t_diff_dof < p.brake.t[0]) ? 0 : 1;
+                if (index > 0) {
+                    t_diff_dof -= p.brake.t[index - 1];
+                }
+
+                set_integrate(t_diff_dof, p.brake.p[index], p.brake.v[index], p.brake.a[index], p.brake.j[index]);
+                return;
+            } else {
+                t_diff_dof -= p.brake.duration;
+            }
+        }
+
+        // Non-time synchronization
+        if (t_diff_dof >= p.t_sum.back()) {
+            // Keep constant acceleration
+            set_integrate(t_diff_dof - p.t_sum.back(), p.p.back(), p.v.back(), p.a.back(), 0.0);
+            return;
+        }
+
+        const auto index_dof_ptr = std::upper_bound(p.t_sum.begin(), p.t_sum.end(), t_diff_dof);
+        const size_t index_dof = std::distance(p.t_sum.begin(), index_dof_ptr);
+
+        if (index_dof > 0) {
+            t_diff_dof -= p.t_sum[index_dof - 1];
+        }
+
+        set_integrate(t_diff_dof, p.p[index_dof], p.v[index_dof], p.a[index_dof], p.j[index_dof]);
+    }
+
     //! Calculates the base values to then integrate from
     template<bool use_section_hint = false, typename Func>
     void state_to_integrate_from(double time, size_t& new_section, Func&& set_integrate) const {
@@ -127,63 +161,28 @@ class Trajectory {
         }
 
         for (size_t dof = 0; dof < degrees_of_freedom; ++dof) {
-            const Profile& p = profiles[new_section][dof];
-            double t_diff_dof = t_diff;
-
-            // Brake pre-trajectory
-            if (p.brake.duration > 0) {
-                if (t_diff_dof < p.brake.duration) {
-                    const size_t index = (t_diff_dof < p.brake.t[0]) ? 0 : 1;
-                    if (index > 0) {
-                        t_diff_dof -= p.brake.t[index - 1];
-                    }
-
-                    set_integrate(dof, t_diff_dof, p.brake.p[index], p.brake.v[index], p.brake.a[index], p.brake.j[index]);
-                    continue;
-                } else {
-                    t_diff_dof -= p.brake.duration;
-                }
-            }
-
-            // Accel post-trajectory
-            // if (new_section == profiles.size() - 1 && p.accel.duration > 0) {
-            //     if (t_diff_dof > p.t_sum.back()) {
-            //         const size_t index = (t_diff_dof < p.accel.t[1]) ? 1 : 0;
-            //         if (index > 0) {
-            //             t_diff_dof -= p.accel.t[index - 1];
-            //         }
-
-            //         t_diff_dof -= p.t_sum.back();
-
-            //         if (t_diff_dof < p.accel.t[1]) {
-            //             set_integrate(dof, t_diff_dof, p.p.back(), p.v.back(), p.a.back(), p.accel.j[1]);
-            //             continue;
-            //         }
-
-            //         t_diff_dof -= p.accel.t[1];
-
-            //         const size_t index = 1;
-            //         set_integrate(dof, t_diff_dof, p.accel.p[index], p.accel.v[index], p.accel.a[index], p.accel.j[index]);
-            //         continue;
-            //     }
-            // }
-
-            // Non-time synchronization
-            if (t_diff_dof >= p.t_sum.back()) {
-                // Keep constant acceleration
-                set_integrate(dof, t_diff_dof - p.t_sum.back(), p.p.back(), p.v.back(), p.a.back(), 0.0);
-                continue;
-            }
-
-            const auto index_dof_ptr = std::upper_bound(p.t_sum.begin(), p.t_sum.end(), t_diff_dof);
-            const size_t index_dof = std::distance(p.t_sum.begin(), index_dof_ptr);
-
-            if (index_dof > 0) {
-                t_diff_dof -= p.t_sum[index_dof - 1];
-            }
-
-            set_integrate(dof, t_diff_dof, p.p[index_dof], p.v[index_dof], p.a[index_dof], p.j[index_dof]);
+            state_to_integrate_from_profile(profiles[new_section][dof], t_diff,
+                [&](double t, double p, double v, double a, double j) { set_integrate(dof, t, p, v, a, j); });
         }
+    }
+
+    double position_at_time_for_dof(double time, size_t dof, size_t section) const {
+        const auto profiles = profiles_view();
+        const auto ends = times_view();
+        if (time >= duration) {
+            const auto& profile = profiles.back()[dof];
+            const double t_pre = (profiles.size() > 1 ? ends[ends.size() - 2] : 0.0) + profile.brake.duration;
+            return std::get<0>(integrate(time - (t_pre + profile.t_sum.back()), profile.p.back(), profile.v.back(), profile.a.back(), 0.0));
+        }
+        if (section >= profiles.size() || (section > 0 && time < ends[section - 1]) || time >= ends[section]) {
+            section = std::upper_bound(ends.begin(), ends.end(), time) - ends.begin();
+        }
+        double t_diff = time;
+        if (section > 0) t_diff -= ends[section - 1];
+        double position;
+        state_to_integrate_from_profile(profiles[section][dof], t_diff,
+            [&](double t, double p, double v, double a, double j) { position = std::get<0>(integrate(t, p, v, a, j)); });
+        return position;
     }
 
     Bound get_position_extrema_for_dof(size_t dof) const {
@@ -203,11 +202,11 @@ class Trajectory {
             }
             if (bound.min < extrema.min) {
                 extrema.min = bound.min;
-                extrema.t_min = section_start + bound.t_min;
+                extrema.t_min = std::clamp(section_start + bound.t_min, section_start, cumulative_times[section]);
             }
             if (bound.max > extrema.max) {
                 extrema.max = bound.max;
-                extrema.t_max = section_start + bound.t_max;
+                extrema.t_max = std::clamp(section_start + bound.t_max, section_start, cumulative_times[section]);
             }
             section_start = cumulative_times[section];
         }
@@ -424,13 +423,10 @@ private:
         const auto profiles = profiles_view();
         const auto ends = times_view();
         const double earliest = std::max(0.0, time_after);
+        const size_t first_section = earliest < duration ? std::upper_bound(ends.begin(), ends.end(), earliest) - ends.begin() : profiles.size();
+        size_t sampling_section = first_section;
         const auto matches = [&](double time) {
-            bool match = false;
-            size_t section;
-            state_to_integrate_from(time, section, [&](size_t axis, double t, double p, double v, double a, double j) {
-                if (axis == dof) match = std::abs(std::get<0>(integrate(t, p, v, a, j)) - position) < 1e-9;
-            });
-            return match;
+            return std::abs(position_at_time_for_dof(time, dof, sampling_section) - position) < 1e-9;
         };
         if (matches(earliest)) return earliest;
         if (earliest == duration) return std::nullopt;
@@ -518,8 +514,8 @@ private:
 
         // Only sections at/after the lower bound participate in sampling. This
         // skips old sections in logarithmic time, including repeated ends.
-        const size_t first_section = std::upper_bound(ends.begin(), ends.end(), earliest) - ends.begin();
         for (size_t i = first_section; i < profiles.size(); ++i) {
+            sampling_section = i;
             const double start = i == 0 ? 0.0 : ends[i - 1];
             const double end = ends[i];
             const auto& profile = profiles[i][dof];

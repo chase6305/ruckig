@@ -27,10 +27,15 @@ class WrapperRegressionTest(unittest.TestCase):
         otg, trajectory = Ruckig(1), Trajectory(1)
         self.assertEqual(otg.calculate(self.input, trajectory), Result.Working)
         self.assertGreater(trajectory.independent_min_durations[0], 0.0)
+        self.input.current_position = [10.0]
+        self.input.current_velocity = [2.0]
+        self.input.current_acceleration = [0.5]
         self.input.enabled = [False]
         self.assertEqual(otg.calculate(self.input, trajectory), Result.Working)
         self.assertEqual(trajectory.independent_min_durations, [0.0])
         self.assertEqual(trajectory.duration, 0.0)
+        for time, position, velocity in [(-2.0, 7.0, 1.0), (-0.5, 9.0625, 1.75), (0.5, 11.0625, 2.25)]:
+            self.assertEqual(trajectory.at_time(time), ([position], [velocity], [0.5]))
 
     def test_pass_to_input_removes_all_crossed_local_waypoints(self):
         self.input.target_position = [4.0]

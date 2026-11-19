@@ -4,6 +4,7 @@
 #include <cmath>
 #include <limits>
 #include <optional>
+#include <random>
 #include <type_traits>
 #include <vector>
 
@@ -281,4 +282,71 @@ TEST_CASE("position queries match native sampling across spatial and temporal sc
             }
         }
     }
+}
+
+TEST_CASE("position queries retain sampled positions on deterministic scaled coupled motion") {
+    std::mt19937 generator(20261119);
+    std::uniform_real_distribution<double> unit(0.0, 1.0);
+    size_t successful = 0;
+    for (size_t index = 0; index < 128; ++index) {
+        INFO("input index: " << index);
+        const size_t dofs = index % 3 == 0 ? 1 : 3;
+        const double space = std::pow(10.0, static_cast<int>(index % 9) * 2 - 8);
+        const double time_scale = std::pow(10.0, static_cast<int>((index / 9) % 6) - 2);
+        InputParameter<> input(dofs);
+        for (size_t d = 0; d < dofs; ++d) {
+            input.current_position[d] = (unit(generator) - 0.5) * space;
+            input.target_position[d] = (unit(generator) - 0.5) * 4 * space;
+            input.max_velocity[d] = (0.5 + 3 * unit(generator)) * space / time_scale;
+            input.max_acceleration[d] = (0.5 + 3 * unit(generator)) * space / (time_scale * time_scale);
+            input.max_jerk[d] = (0.5 + 6 * unit(generator)) * space / (time_scale * time_scale * time_scale);
+            input.current_velocity[d] = (unit(generator) - 0.5) * input.max_velocity[d] * (index % 7 == 0 ? 2.8 : 0.6);
+            input.target_velocity[d] = (unit(generator) - 0.5) * input.max_velocity[d] * 0.6;
+            input.current_acceleration[d] = (unit(generator) - 0.5) * input.max_acceleration[d] * 0.4;
+            input.target_acceleration[d] = (unit(generator) - 0.5) * input.max_acceleration[d] * 0.4;
+        }
+        if (index % 4 == 0) {
+            input.current_velocity.assign(dofs, 0.0);
+            input.current_acceleration.assign(dofs, 0.0);
+            input.target_velocity.assign(dofs, 0.0);
+            input.target_acceleration.assign(dofs, 0.0);
+            for (size_t k = 0; k < index % 8 + 1; ++k) {
+                auto point = input.current_position;
+                for (size_t d = 0; d < dofs; ++d) point[d] = (unit(generator) - 0.5) * 4 * space;
+                input.intermediate_positions.push_back(point);
+            }
+        } else if (index % 11 == 0) {
+            input.synchronization = Synchronization::None;
+        } else if (index % 13 == 0 && dofs > 1) {
+            input.enabled[1] = false;
+        }
+        Ruckig<> solver(dofs);
+        Trajectory<> trajectory(dofs);
+        if (solver.calculate_waypoints(input, trajectory) != Result::Working) continue;
+        ++successful;
+        CAPTURE(input);
+        std::vector<Bound> extrema(dofs);
+        trajectory.get_position_extrema(extrema);
+        for (const auto& bound: extrema) {
+            CHECK(bound.t_min >= 0.0);
+            CHECK(bound.t_min <= trajectory.get_duration());
+            CHECK(bound.t_max >= 0.0);
+            CHECK(bound.t_max <= trajectory.get_duration());
+        }
+        std::vector<double> p(dofs), v(dofs), a(dofs), actual(dofs);
+        for (size_t sample = 1; sample < 10; ++sample) {
+            const double time = trajectory.get_duration() * sample / 10.0;
+            trajectory.at_time(time, p, v, a);
+            const double after = index % 2 == 0 ? 0.75 * time : 0.0;
+            for (size_t d = 0; d < dofs; ++d) {
+                const auto crossing = trajectory.get_first_time_at_position(d, p[d], after);
+                REQUIRE(crossing.has_value());
+                CHECK(*crossing >= after);
+                CHECK(*crossing <= trajectory.get_duration());
+                trajectory.at_time(*crossing, actual);
+                CHECK(std::abs(actual[d] - p[d]) < 1e-9);
+            }
+        }
+    }
+    CHECK(successful > 64);
 }

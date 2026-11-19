@@ -163,3 +163,51 @@ TEST_CASE("batch sampling validates buffers and preserves empty-batch behavior")
     CHECK(pb[0] == 0.0);
     CHECK(pb[1] == 0.0);
 }
+
+TEST_CASE("disabled axes extrapolate their current state before and after the trajectory") {
+    const auto check = []<size_t N>() {
+        auto input = [] {
+            if constexpr (N == 0) return InputParameter<N>(2);
+            else return InputParameter<N>();
+        }();
+        auto solver = [] {
+            if constexpr (N == 0) return Ruckig<N>(2, 0.01);
+            else return Ruckig<N>(0.01);
+        }();
+        auto trajectory = [] {
+            if constexpr (N == 0) return Trajectory<N>(2);
+            else return Trajectory<N>();
+        }();
+        input.current_position = {0.0, 10.0};
+        input.current_velocity = {0.0, 2.0};
+        input.current_acceleration = {0.0, 0.5};
+        input.target_position = {1.0, -100.0};
+        input.max_velocity = input.max_acceleration = input.max_jerk = {1.0, 1.0};
+        const std::vector<double> times {-2.0, -0.5, 0.0, 0.5, 4.0};
+        const std::array<double, 5> expected_p {7.0, 9.0625, 10.0, 11.0625, 22.0};
+        const std::array<double, 5> expected_v {1.0, 1.75, 2.0, 2.25, 4.0};
+        for (bool all_disabled: {false, true}) {
+            input.enabled = {!all_disabled, false};
+            for (double offset: {0.0, 10.0}) {
+                input.current_position[1] = 10.0 + offset;
+                REQUIRE(solver.calculate(input, trajectory) == Result::Working);
+                std::vector<decltype(input.current_position)> ps(times.size(), input.current_position), vs = ps, as = ps;
+                trajectory.at_times(times, ps, vs, as);
+                for (size_t i = 0; i < times.size(); ++i) {
+                    auto p = input.current_position, v = p, a = p, j = p;
+                    size_t section;
+                    trajectory.at_time(times[i], p, v, a, j, section);
+                    CHECK(p[1] == expected_p[i] + offset);
+                    CHECK(v[1] == expected_v[i]);
+                    CHECK(a[1] == 0.5);
+                    CHECK(j[1] == 0.0);
+                    CHECK(ps[i][1] == expected_p[i] + offset);
+                    CHECK(vs[i][1] == expected_v[i]);
+                    CHECK(as[i][1] == 0.5);
+                }
+            }
+        }
+    };
+    check.template operator()<2>();
+    check.template operator()<0>();
+}
