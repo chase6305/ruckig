@@ -258,13 +258,20 @@ class Trajectory {
                 }
             };
             consider(start, section);
-            consider(end, section);
+            consider(end, section + 1);
             visit_sampling_steps(profiles[section][dof], end - start,
                 [&](double pre, double begin, double finish, double, double v, double a, double j) {
                     if (!(begin < finish)) return false;
                     double lower, upper;
                     if (!sampling_step_time_bounds(start, end, pre, begin, finish, lower, upper)) return false;
                     upper = std::nextafter(upper, -std::numeric_limits<double>::infinity());
+                    if (j == 0.0 && a == 0.0) {
+                        // Linear floating-point sampling is monotone, so its
+                        // first and last active samples contain both extrema.
+                        consider(lower, section);
+                        consider(upper, section);
+                        return false;
+                    }
                     around(lower, lower, upper);
                     around(upper, lower, upper);
                     for (double turn: roots::solve_quadratic_scaled(j / 2, a, v, finish - begin)) {
