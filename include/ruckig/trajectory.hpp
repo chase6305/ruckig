@@ -580,7 +580,8 @@ private:
                 // Only boundaries need another lookup to select the next phase.
                 return (section_start <= time && time < section_end && begin <= phase_time && phase_time < end) || matches(time);
             };
-            if (consider_time(lower)) return lower;
+            // The requested lower bound already failed the sampler check.
+            if (lower != earliest && consider_time(lower)) return lower;
             const auto root_time = [&](double root) {
                 const double time = section_start + (pre + (begin + root));
                 return std::isnan(time) ? time : std::clamp(time, lower, upper);
@@ -644,7 +645,8 @@ private:
                         * (std::abs(p) + t * (std::abs(v) + t * (std::abs(a) / 2 + t * std::abs(j) / 6)));
                     if ((position < minimum && minimum - position > tolerance) || (position > maximum && position - maximum > tolerance)) continue;
                 }
-                if (consider_time(left)) return left;
+                // Reuse the failed lower-endpoint check on the first piece.
+                if (left != lower && consider_time(left)) return left;
                 if (within_range) {
                     std::optional<double> first;
                     const auto try_roots = [&](auto candidates) {
