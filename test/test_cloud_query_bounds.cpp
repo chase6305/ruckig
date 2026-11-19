@@ -319,6 +319,30 @@ TEST_CASE("cloud batches preserve discontinuous and zero-duration sections in bo
     CHECK(extrema[0].max == 21.0);
 }
 
+TEST_CASE("cloud queries retain early turning points throughout a very long support") {
+    for (double sign: {-1.0, 1.0}) {
+        for (double duration: {1.0, 1e200}) {
+            auto profile = query_phase(-sign * 0.09375, sign * 0.6875, -3 * sign, 6 * sign, 1.0);
+            profile.t[3] = duration;
+            for (size_t step = 3; step < 7; ++step) profile.t_sum[step] = duration;
+            profile.p.back() = profile.v.back() = profile.a.back() = profile.pf = profile.vf = profile.af = 0.0;
+            const auto trajectory = decoded_query_trajectory({profile}, {duration});
+            double position;
+            trajectory.at_time(0.35, position);
+            for (const auto& window: std::array<std::array<double, 2>, 3> {{{0.0, 0.35},
+                {0.36, 0.575 - 0.5 * std::sqrt(0.1825)}, {0.4, 0.575 + 0.5 * std::sqrt(0.1825)}}}) {
+                const auto crossing = trajectory.get_first_time_at_position(0, position, window[0]);
+                REQUIRE(crossing.has_value());
+                CHECK(*crossing >= window[0]);
+                CHECK(*crossing == doctest::Approx(window[1]).epsilon(1e-9));
+                double actual;
+                trajectory.at_time(*crossing, actual);
+                CHECK(std::abs(actual - position) < 1e-9);
+            }
+        }
+    }
+}
+
 TEST_CASE("cloud query windows include zero-duration responses") {
     const auto zero = query_phase(7.0, 0.0, 0.0, 0.0, 0.0);
     const auto trajectory = decoded_query_trajectory({zero, zero}, {0.0, 0.0});

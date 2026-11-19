@@ -272,6 +272,33 @@ TEST_CASE("scaled velocity roots handle linear derivatives and consistent coeffi
     }
 }
 
+TEST_CASE("velocity roots preserve coefficient scales across wide time windows") {
+    for (double scale: {1e-323, 1e-200, 1.0, 1e200, 1e308}) {
+        for (double horizon: {1e-200, 1.0, 1e200}) {
+            std::vector<double> turns;
+            for (double turn: roots::solve_quadratic_scaled(scale, scale, -scale, horizon)) turns.push_back(turn);
+            REQUIRE(turns.size() == 1);
+            CHECK(turns[0] == doctest::Approx((std::sqrt(5.0) - 1.0) / 2.0).epsilon(1e-12));
+        }
+    }
+    for (double scale: {1e-200, 1.0, 1e200}) {
+        for (double horizon: {1e-200, 1.0, 1e200}) {
+            std::vector<double> turns;
+            for (double turn: roots::solve_quadratic_scaled(3 * scale, -3 * scale, 0.6875 * scale, horizon)) turns.push_back(turn);
+            REQUIRE(turns.size() == 2);
+            CHECK(turns[0] == doctest::Approx(0.5 - std::sqrt(3.0) / 12.0).epsilon(1e-12));
+            CHECK(turns[1] == doctest::Approx(0.5 + std::sqrt(3.0) / 12.0).epsilon(1e-12));
+        }
+    }
+    for (const auto& coefficients: std::array<std::array<double, 4>, 3> {{{1e308, 1e155, -1e-100, 1e-255},
+        {-1e-100, 1e155, 1e308, 1e255}, {1.7e308, 1.7e308, -1.7e308, (std::sqrt(5.0) - 1.0) / 2.0}}}) {
+        std::vector<double> turns;
+        for (double turn: roots::solve_quadratic_scaled(coefficients[0], coefficients[1], coefficients[2], 1.0)) turns.push_back(turn);
+        REQUIRE(turns.size() == 1);
+        CHECK(turns[0] == doctest::Approx(coefficients[3]).epsilon(1e-12).scale(0.0));
+    }
+}
+
 TEST_CASE("position queries match native sampling across spatial and temporal scales") {
     Ruckig<1> solver;
     for (double space: {1e-4, 1.0, 1e4}) {

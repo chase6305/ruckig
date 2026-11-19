@@ -191,13 +191,49 @@ inline PositiveSet<double, 3> solve_cubic_scaled(double a, double b, double c, d
 
 inline PositiveSet<double, 2> solve_quadratic_scaled(double a, double b, double c, double time_scale) {
     PositiveSet<double, 2> result;
+    if (!(time_scale > 0.0) || !std::isfinite(time_scale)) return result;
     if (a == 0.0) {
-        if (b != 0.0 && std::isfinite(b) && std::isfinite(c) && time_scale > 0.0 && std::isfinite(time_scale)) result.insert(-c / b);
+        if (b != 0.0 && std::isfinite(b) && std::isfinite(c)) result.insert(-c / b);
         return result;
     }
     // A strictly positive (or negative) constant and coefficients of the same
     // sign cannot have a nonnegative root, regardless of the time scale.
     if ((a >= 0.0 && b >= 0.0 && c > 0.0) || (a <= 0.0 && b <= 0.0 && c < 0.0)) return result;
+    // Finite normal discriminants keep the original time units and avoid
+    // losing early turning points when the full support is very long.
+    const double discriminant = std::fma(b, b, -4 * (a * c));
+    if (std::isfinite(discriminant) && std::abs(discriminant) >= std::numeric_limits<double>::min()) {
+        if (discriminant > 0.0) {
+            const double q = -0.5 * (b + std::copysign(std::sqrt(discriminant), b));
+            result.insert(q / a);
+            result.insert(c / q);
+        }
+        return result;
+    }
+    // A common coefficient scale preserves small roots within a very long
+    // time window. Recover the original q before dividing when that retains
+    // a coefficient which the common scale rounded to zero.
+    const double magnitude = std::max({std::abs(a), std::abs(b), std::abs(c)});
+    if (magnitude > 0.0 && std::isfinite(magnitude)) {
+        int exponent;
+        std::frexp(magnitude, &exponent);
+        const double sa = std::ldexp(a, -exponent), sb = std::ldexp(b, -exponent), sc = std::ldexp(c, -exponent);
+        const double sd = std::fma(sb, sb, -4 * (sa * sc));
+        if (std::isfinite(sd) && std::abs(sd) >= std::numeric_limits<double>::min()) {
+            if (sd > 0.0) {
+                const double sq = -0.5 * (sb + std::copysign(std::sqrt(sd), sb));
+                const double q = std::ldexp(sq, exponent);
+                if (std::isfinite(q) && std::abs(q) >= std::numeric_limits<double>::min()) {
+                    result.insert(q / a);
+                    result.insert(c / q);
+                } else {
+                    result.insert(sq / sa);
+                    result.insert(sc / sq);
+                }
+            }
+            return result;
+        }
+    }
     std::array<double, 4> scaled;
     int time_exponent;
     if (!scale_cubic({0.0, a, b, c}, time_scale, scaled, time_exponent)) return result;
@@ -206,11 +242,11 @@ inline PositiveSet<double, 2> solve_quadratic_scaled(double a, double b, double 
         if (b != 0.0) result.insert(std::ldexp(-c / b, time_exponent));
         return result;
     }
-    const double discriminant = std::fma(b, b, -4 * a * c);
-    if (discriminant == 0.0) {
+    const double scaled_discriminant = std::fma(b, b, -4 * a * c);
+    if (scaled_discriminant == 0.0) {
         result.insert(std::ldexp(-b / (2 * a), time_exponent));
-    } else if (discriminant > 0.0) {
-        const double q = -0.5 * (b + std::copysign(std::sqrt(discriminant), b));
+    } else if (scaled_discriminant > 0.0) {
+        const double q = -0.5 * (b + std::copysign(std::sqrt(scaled_discriminant), b));
         result.insert(std::ldexp(q / a, time_exponent));
         result.insert(std::ldexp(c / q, time_exponent));
     }
