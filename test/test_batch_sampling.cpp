@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <array>
+#include <cfenv>
 #include <cmath>
 #include <deque>
 #include <limits>
@@ -181,6 +182,31 @@ TEST_CASE("batch sampling validates buffers and preserves empty-batch behavior")
             CHECK(converted_v[i][dof] == ev[dof]);
             CHECK(converted_a[i][dof] == ea[dof]);
         }
+    }
+}
+
+TEST_CASE("batch direction selection rejects quiet NaNs without invalid floating-point operations") {
+    InputParameter<1> input;
+    input.target_position = {1.0};
+    input.max_velocity = input.max_acceleration = input.max_jerk = {1.0};
+    Trajectory<1> trajectory;
+    REQUIRE(Ruckig<1>().calculate(input, trajectory) == Result::Working);
+    // A runtime value keeps constant folding from hiding an ordered NaN comparison.
+    volatile double nan = std::numeric_limits<double>::quiet_NaN();
+    for (size_t index: {size_t(0), size_t(1), size_t(2)}) {
+        std::array<double, 3> times {0.0, 0.5, 1.0};
+        times[index] = nan;
+        std::array<std::array<double, 1>, 3> p, v, a;
+        std::fenv_t saved;
+        std::fegetenv(&saved);
+        std::feclearexcept(FE_ALL_EXCEPT);
+        bool caught = false;
+        try { trajectory.at_times(times, p, v, a); }
+        catch (const RuckigError&) { caught = true; }
+        const int invalid = std::fetestexcept(FE_INVALID);
+        std::fesetenv(&saved);
+        CHECK(caught);
+        CHECK(invalid == 0);
     }
 }
 

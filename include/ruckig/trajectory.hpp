@@ -485,7 +485,12 @@ public:
         }
         // Choose a preferred direction from this batch's endpoints. Mixed
         // time order retains binary-search fallback, with no shared cursor.
-        if (times.size() > 1 && static_cast<double>(times[times.size() - 1]) < static_cast<double>(times[0])) {
+        bool reverse = false;
+        if (times.size() > 1) {
+            const double first = static_cast<double>(times[0]), last = static_cast<double>(times[times.size() - 1]);
+            reverse = std::isfinite(first) && std::isfinite(last) && last < first;
+        }
+        if (reverse) {
             at_times_impl<true>(times, positions, velocities, accelerations);
         } else {
             at_times_impl<false>(times, positions, velocities, accelerations);
