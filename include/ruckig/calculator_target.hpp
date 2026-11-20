@@ -295,9 +295,9 @@ private:
                     (*cache)[dof].reset();
                 }
                 p = Profile{};
-                p.p.back() = inp.current_position[dof];
-                p.v.back() = inp.current_velocity[dof];
-                p.a.back() = inp.current_acceleration[dof];
+                p.p.fill(inp.current_position[dof]);
+                p.v.fill(inp.current_velocity[dof]);
+                p.a.fill(inp.current_acceleration[dof]);
                 p.t_sum.back() = 0.0;
                 blocks[dof].t_min = 0.0;
                 traj.independent_min_durations[dof] = 0.0;

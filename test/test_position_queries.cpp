@@ -4,6 +4,7 @@
 #include <cmath>
 #include <limits>
 #include <optional>
+#include <random>
 #include <type_traits>
 #include <vector>
 
@@ -124,4 +125,329 @@ TEST_CASE("position query windows include the origin of zero-duration trajectori
     CHECK(trajectory.get_first_time_at_position(0, 0.0, 0.0) == std::optional<double>(0.0));
     CHECK_FALSE(trajectory.get_first_time_at_position(0, 0.0,
         std::nextafter(0.0, std::numeric_limits<double>::infinity())).has_value());
+}
+
+TEST_CASE("position queries retain small derivatives over long native profiles") {
+    Ruckig<1> solver;
+    for (double sign: {-1.0, 1.0}) {
+        for (double jerk: {1e-17, 1e-16, 1e-15}) {
+            INFO("sign: " << sign << ", jerk: " << jerk);
+            auto input = position_query_input();
+            input.target_position = {sign * 1e-7};
+            input.max_velocity = input.max_acceleration = {1.0};
+            input.max_jerk = {jerk};
+            Trajectory<1> trajectory;
+            REQUIRE(solver.calculate(input, trajectory) == Result::Working);
+            for (double fraction: {0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8}) {
+                const double time = fraction * trajectory.get_duration();
+                double position;
+                trajectory.at_time(time, position);
+                const auto crossing = trajectory.get_first_time_at_position(0, position);
+                REQUIRE(crossing.has_value());
+                CHECK(*crossing == doctest::Approx(time).epsilon(1e-10));
+                double sampled_position;
+                trajectory.at_time(*crossing, sampled_position);
+                CHECK(std::abs(sampled_position - position) < 1e-9);
+                const auto bounded = trajectory.get_first_time_at_position(0, position, 0.5 * time);
+                REQUIRE(bounded.has_value());
+                CHECK(*bounded >= 0.5 * time);
+                CHECK(*bounded <= trajectory.get_duration());
+            }
+        }
+    }
+}
+
+TEST_CASE("small positive velocity discriminants retain interior position extrema and limits") {
+    Ruckig<1> solver;
+    for (double scale: {1.0, 1000.0}) {
+        for (double sign: {-1.0, 1.0}) {
+            INFO("scale: " << scale << ", sign: " << sign);
+            const double j = sign * 1e-17 * scale, v = -sign * 1e-10 * scale;
+            const double duration = 6000.0;
+            auto input = position_query_input();
+            input.current_velocity = {v};
+            std::tie(input.target_position[0], input.target_velocity[0], input.target_acceleration[0]) = integrate(duration, 0.0, v, 0.0, j);
+            input.max_velocity = {1e-8 * scale};
+            input.max_acceleration = {1e-10 * scale};
+            input.max_jerk = {std::abs(j)};
+            Trajectory<1> trajectory;
+            REQUIRE(solver.calculate(input, trajectory) == Result::Working);
+            const double turn = std::sqrt(-2 * v / j);
+            const double expected = std::get<0>(integrate(turn, 0.0, v, 0.0, j));
+            std::array<Bound, 1> extrema;
+            trajectory.get_position_extrema(extrema);
+            const auto& bound = extrema[0];
+            CHECK((sign > 0.0 ? bound.min : bound.max) == doctest::Approx(expected).epsilon(1e-10).scale(0.0));
+            CHECK((sign > 0.0 ? bound.t_min : bound.t_max) == doctest::Approx(turn).epsilon(1e-10));
+            const double limit = 0.5 * (expected + input.target_position[0]);
+            if (sign > 0.0) input.min_position = {limit};
+            else input.max_position = {limit};
+            REQUIRE(solver.calculate(input, trajectory) == Result::ErrorPositionalLimits);
+            CHECK_THROWS_AS(trajectory.at_time(turn, input.current_position), RuckigError);
+            CHECK_NOTHROW(trajectory.get_position_extrema(extrema));
+        }
+    }
+}
+
+TEST_CASE("position extrema keep a turning point lost by quadratic cancellation") {
+    for (double sign: {-1.0, 1.0}) {
+        Bound bound {std::numeric_limits<double>::infinity(), -std::numeric_limits<double>::infinity(), 0.0, 0.0};
+        Profile::check_step_for_position_extremum(0.0, 1e-15, 0.0, -sign * 1e16, sign * 1e32, sign, bound);
+        CHECK((sign > 0.0 ? bound.min : bound.max) == doctest::Approx(-sign * 0.5));
+        CHECK((sign > 0.0 ? bound.t_min : bound.t_max) == doctest::Approx(1e-16).scale(0.0));
+    }
+}
+
+TEST_CASE("position extrema retain turning points after discriminant overflow or underflow") {
+    for (double scale: {1e-200, 1e200}) {
+        for (double sign: {-1.0, 1.0}) {
+            Bound bound {std::numeric_limits<double>::infinity(), -std::numeric_limits<double>::infinity(), 0.0, 0.0};
+            Profile::check_step_for_position_extremum(0.0, 2.0, 0.0, -sign * scale, sign * scale, sign * scale, bound);
+            const double expected = sign * scale * (4.0 / 3.0 - std::sqrt(3.0));
+            CHECK((sign > 0.0 ? bound.min : bound.max) == doctest::Approx(expected).epsilon(1e-12).scale(0.0));
+            CHECK((sign > 0.0 ? bound.t_min : bound.t_max) == doctest::Approx(std::sqrt(3.0) - 1.0));
+        }
+    }
+}
+
+TEST_CASE("position extrema include a brake with only its second phase active") {
+    Ruckig<1> solver;
+    for (double sign: {-1.0, 1.0}) {
+        InputParameter<1> input;
+        input.current_position = {0.0};
+        input.current_velocity = {2.0 * sign};
+        input.current_acceleration = {-sign};
+        input.target_position = {3.0 * sign};
+        input.max_velocity = input.max_acceleration = input.max_jerk = {1.0};
+        Trajectory<1> trajectory;
+        REQUIRE(solver.calculate(input, trajectory) == Result::Working);
+        const auto brake = trajectory.get_profiles()[0][0].brake;
+        REQUIRE(brake.t[0] == 0.0);
+        REQUIRE(brake.t[1] > 0.0);
+        std::array<Bound, 1> extrema;
+        trajectory.get_position_extrema(extrema);
+        CHECK((sign > 0.0 ? extrema[0].min : extrema[0].max) == 0.0);
+        CHECK((sign > 0.0 ? extrema[0].t_min : extrema[0].t_max) == 0.0);
+        const auto crossing = trajectory.get_first_time_at_position(0, sign);
+        REQUIRE(crossing.has_value());
+        CHECK(*crossing == doctest::Approx(2.0 - std::sqrt(2.0)));
+        if (sign > 0.0) input.min_position = {0.5};
+        else input.max_position = {-0.5};
+        CHECK(solver.calculate(input, trajectory) == Result::ErrorPositionalLimits);
+    }
+}
+
+TEST_CASE("position-query conditioning avoids intermediate time-power overflow and underflow") {
+    for (const auto& coefficients: std::vector<std::array<double, 6>> {
+        {1e-300, 0.0, 0.0, -1.0, 1e100, 1e100},
+        {1e300, 0.0, 0.0, -1.0, 1e-100, 1e-100},
+        {0.0, 1e-300, 0.0, -1.0, 1e150, 1e150},
+        {0.0, 0.0, 1e-300, -1.0, 1e300, 1e300},
+    }) {
+        const auto& c = coefficients;
+        std::vector<double> roots;
+        for (double root: roots::solve_cubic_scaled(c[0], c[1], c[2], c[3], c[4])) roots.push_back(root);
+        REQUIRE(roots.size() == 1);
+        CHECK(roots.front() == doctest::Approx(c[5]).epsilon(1e-12).scale(0.0));
+    }
+}
+
+TEST_CASE("scaled velocity roots handle linear derivatives and consistent coefficient signs") {
+    for (const auto& coefficients: std::array<std::array<double, 4>, 3> {{{1e-300, -1.0, 1e300, 1e300},
+        {1e300, -1.0, 1e-300, 1e-300}, {-2.0, 1.0, 4.0, 0.5}}}) {
+        std::vector<double> turns;
+        for (double turn: roots::solve_quadratic_scaled(0.0, coefficients[0], coefficients[1], coefficients[2])) turns.push_back(turn);
+        REQUIRE(turns.size() == 1);
+        CHECK(turns[0] == doctest::Approx(coefficients[3]).epsilon(1e-12).scale(0.0));
+    }
+    for (double sign: {-1.0, 1.0}) {
+        size_t count = 0;
+        for ([[maybe_unused]] double turn: roots::solve_quadratic_scaled(sign, 2 * sign, sign, 1.0)) ++count;
+        CHECK(count == 0);
+    }
+    for (double invalid: {0.0, -1.0, std::numeric_limits<double>::infinity(), std::numeric_limits<double>::quiet_NaN()}) {
+        size_t count = 0;
+        for ([[maybe_unused]] double turn: roots::solve_quadratic_scaled(0.0, 1.0, -1.0, invalid)) ++count;
+        CHECK(count == 0);
+    }
+}
+
+TEST_CASE("velocity roots preserve coefficient scales across wide time windows") {
+    for (double scale: {1e-323, 1e-200, 1.0, 1e200, 1e308}) {
+        for (double horizon: {1e-200, 1.0, 1e200}) {
+            std::vector<double> turns;
+            for (double turn: roots::solve_quadratic_scaled(scale, scale, -scale, horizon)) turns.push_back(turn);
+            REQUIRE(turns.size() == 1);
+            CHECK(turns[0] == doctest::Approx((std::sqrt(5.0) - 1.0) / 2.0).epsilon(1e-12));
+        }
+    }
+    for (double scale: {1e-200, 1.0, 1e200}) {
+        for (double horizon: {1e-200, 1.0, 1e200}) {
+            std::vector<double> turns;
+            for (double turn: roots::solve_quadratic_scaled(3 * scale, -3 * scale, 0.6875 * scale, horizon)) turns.push_back(turn);
+            REQUIRE(turns.size() == 2);
+            CHECK(turns[0] == doctest::Approx(0.5 - std::sqrt(3.0) / 12.0).epsilon(1e-12));
+            CHECK(turns[1] == doctest::Approx(0.5 + std::sqrt(3.0) / 12.0).epsilon(1e-12));
+        }
+    }
+    for (const auto& coefficients: std::array<std::array<double, 4>, 3> {{{1e308, 1e155, -1e-100, 1e-255},
+        {-1e-100, 1e155, 1e308, 1e255}, {1.7e308, 1.7e308, -1.7e308, (std::sqrt(5.0) - 1.0) / 2.0}}}) {
+        std::vector<double> turns;
+        for (double turn: roots::solve_quadratic_scaled(coefficients[0], coefficients[1], coefficients[2], 1.0)) turns.push_back(turn);
+        REQUIRE(turns.size() == 1);
+        CHECK(turns[0] == doctest::Approx(coefficients[3]).epsilon(1e-12).scale(0.0));
+    }
+}
+
+TEST_CASE("velocity roots retain subnormal discriminants within wide time windows") {
+    for (int exponent: {-530, -537}) {
+        const double first = std::ldexp(1.0, exponent);
+        const double constant = std::ldexp(1.0, 2 * exponent + 1);
+        for (double sign: {-1.0, 1.0}) {
+            for (double horizon: {1e-200, 1.0, 1e200}) {
+                INFO("exponent: " << exponent << ", horizon: " << horizon << ", sign: " << sign);
+                std::vector<double> turns;
+                for (double turn: roots::solve_quadratic_scaled(sign, -3 * sign * first, sign * constant, horizon)) turns.push_back(turn);
+                REQUIRE(turns.size() == 2);
+                CHECK(turns[0] == doctest::Approx(first).epsilon(1e-12).scale(0.0));
+                CHECK(turns[1] == doctest::Approx(2 * first).epsilon(1e-12).scale(0.0));
+            }
+        }
+    }
+    for (double sign: {-1.0, 1.0}) {
+        std::vector<double> turns;
+        for (double turn: roots::solve_quadratic_scaled(-sign, 0.0, sign * 1e-318, 1e200)) turns.push_back(turn);
+        REQUIRE(turns.size() == 1);
+        CHECK(turns[0] == doctest::Approx(std::sqrt(1e-318)).epsilon(1e-12).scale(0.0));
+    }
+}
+
+TEST_CASE("position queries match native sampling across spatial and temporal scales") {
+    Ruckig<1> solver;
+    for (double space: {1e-4, 1.0, 1e4}) {
+        for (double time_scale: {1e-3, 1.0, 100.0}) {
+            for (double sign: {-1.0, 1.0}) {
+                INFO("space: " << space << ", time scale: " << time_scale << ", sign: " << sign);
+                auto input = position_query_input();
+                input.target_position = {sign * space};
+                input.max_velocity = {2.0 * space / time_scale};
+                input.max_acceleration = {2.0 * space / (time_scale * time_scale)};
+                input.max_jerk = {4.0 * space / (time_scale * time_scale * time_scale)};
+                Trajectory<1> trajectory;
+                REQUIRE(solver.calculate(input, trajectory) == Result::Working);
+                for (size_t sample = 1; sample < 20; ++sample) {
+                    const double time = trajectory.get_duration() * sample / 20.0;
+                    double position;
+                    trajectory.at_time(time, position);
+                    for (double after: {0.0, 0.75 * time}) {
+                        const auto crossing = trajectory.get_first_time_at_position(0, position, after);
+                        REQUIRE(crossing.has_value());
+                        CHECK(*crossing >= after);
+                        CHECK(*crossing <= trajectory.get_duration());
+                        double actual;
+                        trajectory.at_time(*crossing, actual);
+                        CHECK(std::abs(actual - position) < 1e-9);
+                    }
+                }
+            }
+        }
+    }
+}
+
+TEST_CASE("position queries retain representable crossings beside rounded analytic roots") {
+    for (const auto& motion: std::array<std::array<double, 3>, 3> {{{-33515968.441566069, -94759388.733532175, 1.3},
+        {6765946.0181921376, 80596563.632967055, 0.4}, {65740835.480148509, -21760337.2967779, 1.6}}}) {
+        const auto [position, velocity, time] = motion;
+        CAPTURE(position);
+        CAPTURE(velocity);
+        CAPTURE(time);
+        InputParameter<1> input;
+        input.current_position = {position};
+        input.target_position = {position + 2 * velocity};
+        input.current_velocity = input.target_velocity = {velocity};
+        input.max_velocity = {std::abs(velocity)};
+        input.max_acceleration = {1.0};
+        input.max_jerk = {0.0};
+        Ruckig<1> solver;
+        Trajectory<1> trajectory;
+        REQUIRE(solver.calculate(input, trajectory) == Result::Working);
+        double sampled;
+        trajectory.at_time(time, sampled);
+        for (double after: {0.0, 0.5 * time}) {
+            const auto crossing = trajectory.get_first_time_at_position(0, sampled, after);
+            REQUIRE(crossing.has_value());
+            CHECK(*crossing >= after);
+            CHECK(*crossing <= trajectory.get_duration());
+            double actual;
+            trajectory.at_time(*crossing, actual);
+            CHECK(std::abs(actual - sampled) < 1e-9);
+        }
+    }
+}
+
+TEST_CASE("position queries retain sampled positions on deterministic scaled coupled motion") {
+    std::mt19937 generator(20261119);
+    std::uniform_real_distribution<double> unit(0.0, 1.0);
+    size_t successful = 0;
+    for (size_t index = 0; index < 128; ++index) {
+        INFO("input index: " << index);
+        const size_t dofs = index % 3 == 0 ? 1 : 3;
+        const double space = std::pow(10.0, static_cast<int>(index % 9) * 2 - 8);
+        const double time_scale = std::pow(10.0, static_cast<int>((index / 9) % 6) - 2);
+        InputParameter<> input(dofs);
+        for (size_t d = 0; d < dofs; ++d) {
+            input.current_position[d] = (unit(generator) - 0.5) * space;
+            input.target_position[d] = (unit(generator) - 0.5) * 4 * space;
+            input.max_velocity[d] = (0.5 + 3 * unit(generator)) * space / time_scale;
+            input.max_acceleration[d] = (0.5 + 3 * unit(generator)) * space / (time_scale * time_scale);
+            input.max_jerk[d] = (0.5 + 6 * unit(generator)) * space / (time_scale * time_scale * time_scale);
+            input.current_velocity[d] = (unit(generator) - 0.5) * input.max_velocity[d] * (index % 7 == 0 ? 2.8 : 0.6);
+            input.target_velocity[d] = (unit(generator) - 0.5) * input.max_velocity[d] * 0.6;
+            input.current_acceleration[d] = (unit(generator) - 0.5) * input.max_acceleration[d] * 0.4;
+            input.target_acceleration[d] = (unit(generator) - 0.5) * input.max_acceleration[d] * 0.4;
+        }
+        if (index % 4 == 0) {
+            input.current_velocity.assign(dofs, 0.0);
+            input.current_acceleration.assign(dofs, 0.0);
+            input.target_velocity.assign(dofs, 0.0);
+            input.target_acceleration.assign(dofs, 0.0);
+            for (size_t k = 0; k < index % 8 + 1; ++k) {
+                auto point = input.current_position;
+                for (size_t d = 0; d < dofs; ++d) point[d] = (unit(generator) - 0.5) * 4 * space;
+                input.intermediate_positions.push_back(point);
+            }
+        } else if (index % 11 == 0) {
+            input.synchronization = Synchronization::None;
+        } else if (index % 13 == 0 && dofs > 1) {
+            input.enabled[1] = false;
+        }
+        Ruckig<> solver(dofs);
+        Trajectory<> trajectory(dofs);
+        if (solver.calculate_waypoints(input, trajectory) != Result::Working) continue;
+        ++successful;
+        CAPTURE(input);
+        std::vector<Bound> extrema(dofs);
+        trajectory.get_position_extrema(extrema);
+        for (const auto& bound: extrema) {
+            CHECK(bound.t_min >= 0.0);
+            CHECK(bound.t_min <= trajectory.get_duration());
+            CHECK(bound.t_max >= 0.0);
+            CHECK(bound.t_max <= trajectory.get_duration());
+        }
+        std::vector<double> p(dofs), v(dofs), a(dofs), actual(dofs);
+        for (size_t sample = 1; sample < 10; ++sample) {
+            const double time = trajectory.get_duration() * sample / 10.0;
+            trajectory.at_time(time, p, v, a);
+            const double after = index % 2 == 0 ? 0.75 * time : 0.0;
+            for (size_t d = 0; d < dofs; ++d) {
+                const auto crossing = trajectory.get_first_time_at_position(d, p[d], after);
+                REQUIRE(crossing.has_value());
+                CHECK(*crossing >= after);
+                CHECK(*crossing <= trajectory.get_duration());
+                trajectory.at_time(*crossing, actual);
+                CHECK(std::abs(actual[d] - p[d]) < 1e-9);
+            }
+        }
+    }
+    CHECK(successful > 64);
 }

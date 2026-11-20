@@ -2,6 +2,7 @@
 
 #include <array>
 #include <functional>
+#include <numeric>
 #include <span>
 #include <tuple>
 #include <vector>
@@ -82,8 +83,42 @@ class Trajectory {
     }
 #endif
 
-    //! Calculates the base values to then integrate from
     template<typename Func>
+    static void state_to_integrate_from_profile(const Profile& p, double t_diff_dof, Func&& set_integrate) {
+        // Brake pre-trajectory
+        if (p.brake.duration > 0) {
+            if (t_diff_dof < p.brake.duration) {
+                const size_t index = (t_diff_dof < p.brake.t[0]) ? 0 : 1;
+                if (index > 0) {
+                    t_diff_dof -= p.brake.t[index - 1];
+                }
+
+                set_integrate(t_diff_dof, p.brake.p[index], p.brake.v[index], p.brake.a[index], p.brake.j[index]);
+                return;
+            } else {
+                t_diff_dof -= p.brake.duration;
+            }
+        }
+
+        // Non-time synchronization
+        if (t_diff_dof >= p.t_sum.back()) {
+            // Keep constant acceleration
+            set_integrate(t_diff_dof - p.t_sum.back(), p.p.back(), p.v.back(), p.a.back(), 0.0);
+            return;
+        }
+
+        const auto index_dof_ptr = std::upper_bound(p.t_sum.begin(), p.t_sum.end(), t_diff_dof);
+        const size_t index_dof = std::distance(p.t_sum.begin(), index_dof_ptr);
+
+        if (index_dof > 0) {
+            t_diff_dof -= p.t_sum[index_dof - 1];
+        }
+
+        set_integrate(t_diff_dof, p.p[index_dof], p.v[index_dof], p.a[index_dof], p.j[index_dof]);
+    }
+
+    //! Calculates the base values to then integrate from
+    template<bool use_section_hint = false, bool prefer_reverse_hint = false, typename Func>
     void state_to_integrate_from(double time, size_t& new_section, Func&& set_integrate) const {
         if (!calculated || !has_valid_profile_structure() || !std::isfinite(time)) {
             throw RuckigError("trajectory sampling requires a calculated trajectory, matching dimensions, and a finite time.");
@@ -102,74 +137,188 @@ class Trajectory {
             return;
         }
 
-        const auto new_section_ptr = std::upper_bound(cumulative_times.begin(), cumulative_times.end(), time);
-        new_section = std::distance(cumulative_times.begin(), new_section_ptr);
+        bool section_found = false;
+        if constexpr (use_section_hint) {
+            if (profiles.size() == 1) {
+                new_section = 0;
+                section_found = true;
+            } else if constexpr (prefer_reverse_hint) {
+                if (new_section < profiles.size() && time < cumulative_times[new_section]) {
+                    if (new_section == 0 || cumulative_times[new_section - 1] <= time) {
+                        section_found = true;
+                    } else if (new_section == 1 || cumulative_times[new_section - 2] <= time) {
+                        --new_section;
+                        section_found = true;
+                    }
+                } else if (new_section == profiles.size() && new_section > 0
+                    && (new_section == 1 || cumulative_times[new_section - 2] <= time)) {
+                    --new_section;
+                    section_found = true;
+                }
+            } else if (new_section < profiles.size() && (new_section == 0 || cumulative_times[new_section - 1] <= time)) {
+                if (time < cumulative_times[new_section]) {
+                    section_found = true;
+                } else if (new_section + 1 < profiles.size() && time < cumulative_times[new_section + 1]) {
+                    ++new_section;
+                    section_found = true;
+                }
+            }
+        }
+        if (!section_found) {
+            const auto new_section_ptr = std::upper_bound(cumulative_times.begin(), cumulative_times.end(), time);
+            new_section = std::distance(cumulative_times.begin(), new_section_ptr);
+        }
         double t_diff = time;
         if (new_section > 0) {
             t_diff -= cumulative_times[new_section - 1];
         }
 
         for (size_t dof = 0; dof < degrees_of_freedom; ++dof) {
-            const Profile& p = profiles[new_section][dof];
-            double t_diff_dof = t_diff;
-
-            // Brake pre-trajectory
-            if (p.brake.duration > 0) {
-                if (t_diff_dof < p.brake.duration) {
-                    const size_t index = (t_diff_dof < p.brake.t[0]) ? 0 : 1;
-                    if (index > 0) {
-                        t_diff_dof -= p.brake.t[index - 1];
-                    }
-
-                    set_integrate(dof, t_diff_dof, p.brake.p[index], p.brake.v[index], p.brake.a[index], p.brake.j[index]);
-                    continue;
-                } else {
-                    t_diff_dof -= p.brake.duration;
-                }
-            }
-
-            // Accel post-trajectory
-            // if (new_section == profiles.size() - 1 && p.accel.duration > 0) {
-            //     if (t_diff_dof > p.t_sum.back()) {
-            //         const size_t index = (t_diff_dof < p.accel.t[1]) ? 1 : 0;
-            //         if (index > 0) {
-            //             t_diff_dof -= p.accel.t[index - 1];
-            //         }
-
-            //         t_diff_dof -= p.t_sum.back();
-
-            //         if (t_diff_dof < p.accel.t[1]) {
-            //             set_integrate(dof, t_diff_dof, p.p.back(), p.v.back(), p.a.back(), p.accel.j[1]);
-            //             continue;
-            //         }
-
-            //         t_diff_dof -= p.accel.t[1];
-
-            //         const size_t index = 1;
-            //         set_integrate(dof, t_diff_dof, p.accel.p[index], p.accel.v[index], p.accel.a[index], p.accel.j[index]);
-            //         continue;
-            //     }
-            // }
-
-            // Non-time synchronization
-            if (t_diff_dof >= p.t_sum.back()) {
-                // Keep constant acceleration
-                set_integrate(dof, t_diff_dof - p.t_sum.back(), p.p.back(), p.v.back(), p.a.back(), 0.0);
-                continue;
-            }
-
-            const auto index_dof_ptr = std::upper_bound(p.t_sum.begin(), p.t_sum.end(), t_diff_dof);
-            const size_t index_dof = std::distance(p.t_sum.begin(), index_dof_ptr);
-
-            if (index_dof > 0) {
-                t_diff_dof -= p.t_sum[index_dof - 1];
-            }
-
-            set_integrate(dof, t_diff_dof, p.p[index_dof], p.v[index_dof], p.a[index_dof], p.j[index_dof]);
+            state_to_integrate_from_profile(profiles[new_section][dof], t_diff,
+                [&](double t, double p, double v, double a, double j) { set_integrate(dof, t, p, v, a, j); });
         }
     }
 
+    template<bool reverse, class Times, class States>
+    void at_times_impl(const Times& times, States& positions, States& velocities, States& accelerations) const {
+        size_t section = 0;
+        for (size_t i = 0; i < times.size(); ++i) {
+            if (positions[i].size() != degrees_of_freedom || velocities[i].size() != degrees_of_freedom || accelerations[i].size() != degrees_of_freedom) {
+                throw RuckigError("mismatch in degrees of freedom (vector size).");
+            }
+            state_to_integrate_from<true, reverse>(times[i], section, [&](size_t dof, double t, double p, double v, double a, double j) {
+                std::tie(positions[i][dof], velocities[i][dof], accelerations[i][dof]) = integrate(t, p, v, a, j);
+            });
+        }
+    }
+
+    double position_at_time_for_dof(double time, size_t dof, size_t section) const {
+        const auto profiles = profiles_view();
+        const auto ends = times_view();
+        if (time >= duration) {
+            const auto& profile = profiles.back()[dof];
+            const double t_pre = (profiles.size() > 1 ? ends[ends.size() - 2] : 0.0) + profile.brake.duration;
+            return std::get<0>(integrate(time - (t_pre + profile.t_sum.back()), profile.p.back(), profile.v.back(), profile.a.back(), 0.0));
+        }
+        if (section >= profiles.size() || (section > 0 && time < ends[section - 1]) || time >= ends[section]) {
+            section = std::upper_bound(ends.begin(), ends.end(), time) - ends.begin();
+        }
+        double t_diff = time;
+        if (section > 0) t_diff -= ends[section - 1];
+        double position;
+        state_to_integrate_from_profile(profiles[section][dof], t_diff,
+            [&](double t, double p, double v, double a, double j) { position = std::get<0>(integrate(t, p, v, a, j)); });
+        return position;
+    }
+
+    // Visit the polynomial supports selected by ordinary sampling. Raw phase
+    // durations in cloud responses need not describe the same timeline.
+    template<typename Func>
+    static bool visit_sampling_steps(const Profile& profile, double section_duration, Func&& visit) {
+        if (profile.brake.duration > 0.0) {
+            const auto& brake = profile.brake;
+            if (brake.t[0] > 0.0 && visit(0.0, 0.0, std::min(brake.t[0], brake.duration),
+                brake.p[0], brake.v[0], brake.a[0], brake.j[0])) return true;
+            if (brake.t[0] < brake.duration && visit(0.0, brake.t[0], brake.duration,
+                brake.p[1], brake.v[1], brake.a[1], brake.j[1])) return true;
+        }
+        double phase_start = 0.0;
+        for (size_t phase = 0; phase < 7; ++phase) {
+            if (phase_start < profile.t_sum[phase] && visit(profile.brake.duration, phase_start, profile.t_sum[phase],
+                profile.p[phase], profile.v[phase], profile.a[phase], profile.j[phase])) return true;
+            phase_start = profile.t_sum[phase];
+        }
+        return visit(profile.brake.duration, phase_start, section_duration - profile.brake.duration,
+            profile.p.back(), profile.v.back(), profile.a.back(), 0.0);
+    }
+
+    // Return the first active time and first following inactive time. Keeping
+    // the sampler's comparison order matters at rounded cumulative boundaries.
+    static bool sampling_step_time_bounds(double start, double end, double pre, double begin, double finish,
+        double& lower, double& upper) {
+        const auto phase_time = [&](double time) { return (time - start) - pre; };
+        const auto boundary_time = [&](double boundary) {
+            double time = std::clamp(start + (pre + boundary), start, end);
+            // With no brake offset, subtraction is exact at the origin or
+            // within a factor of two (Sterbenz's lemma). The rounded sum then
+            // needs at most one upward adjustment and no predecessor search.
+            if (pre == 0.0 && (start == 0.0 || time <= 2 * start)) {
+                if (time < end && time - start < boundary) time = std::nextafter(time, end);
+                return time;
+            }
+            while (time < end && phase_time(time) < boundary) time = std::nextafter(time, end);
+            while (time > start) {
+                const double previous = std::nextafter(time, start);
+                if (phase_time(previous) < boundary) break;
+                time = previous;
+            }
+            return time;
+        };
+        lower = boundary_time(begin);
+        upper = boundary_time(finish);
+        return lower < end && lower < upper && begin <= phase_time(lower) && phase_time(lower) < finish;
+    }
+
+#if defined WITH_CLOUD_CLIENT
+    Bound get_cloud_position_extrema_for_dof(size_t dof) const {
+        Bound extrema {std::numeric_limits<double>::infinity(), -std::numeric_limits<double>::infinity(), 0.0, 0.0};
+        bool finite = true;
+        const auto profiles = profiles_view();
+        const auto ends = times_view();
+        const auto consider = [&](double time, size_t section) {
+            if (!(0.0 <= time && time <= duration)) return;
+            const double position = position_at_time_for_dof(time, dof, section);
+            if (!std::isfinite(position)) { finite = false; return; }
+            if (position < extrema.min) { extrema.min = position; extrema.t_min = time; }
+            if (position > extrema.max) { extrema.max = position; extrema.t_max = time; }
+        };
+        for (size_t section = 0; section < profiles.size(); ++section) {
+            const double start = section == 0 ? 0.0 : ends[section - 1];
+            const double end = ends[section];
+            const auto around = [&](double time, double lower, double upper) {
+                consider(time, section);
+                double before = time, after = time;
+                for (size_t neighbor = 0; neighbor < 4; ++neighbor) {
+                    if (before > lower) { before = std::nextafter(before, lower); consider(before, section); }
+                    if (after < upper) { after = std::nextafter(after, upper); consider(after, section); }
+                }
+            };
+            consider(start, section);
+            consider(end, section + 1);
+            visit_sampling_steps(profiles[section][dof], end - start,
+                [&](double pre, double begin, double finish, double, double v, double a, double j) {
+                    if (!(begin < finish)) return false;
+                    double lower, upper;
+                    if (!sampling_step_time_bounds(start, end, pre, begin, finish, lower, upper)) return false;
+                    upper = std::nextafter(upper, -std::numeric_limits<double>::infinity());
+                    if (j == 0.0 && a == 0.0) {
+                        // Linear floating-point sampling is monotone, so its
+                        // first and last active samples contain both extrema.
+                        consider(lower, section);
+                        consider(upper, section);
+                        return false;
+                    }
+                    around(lower, lower, upper);
+                    around(upper, lower, upper);
+                    // A raw cloud support may greatly exceed its logical
+                    // section; condition turning points on sampled times.
+                    const double time_scale = std::max(0.0, ((upper - start) - pre) - begin);
+                    for (double turn: roots::solve_quadratic_scaled(j / 2, a, v, time_scale)) {
+                        const double time = start + (pre + (begin + turn));
+                        if (lower <= time && time <= upper) around(time, lower, upper);
+                    }
+                    return false;
+                });
+        }
+        if (!finite) extrema.min = extrema.max = std::numeric_limits<double>::quiet_NaN();
+        return extrema;
+    }
+#endif
+
     Bound get_position_extrema_for_dof(size_t dof) const {
+#if defined WITH_CLOUD_CLIENT
+        if (!independent_min_durations_available) return get_cloud_position_extrema_for_dof(dof);
+#endif
         const auto profiles = profiles_view();
         const auto cumulative_times = times_view();
         Bound extrema {std::numeric_limits<double>::infinity(), -std::numeric_limits<double>::infinity(), 0.0, 0.0};
@@ -186,11 +335,11 @@ class Trajectory {
             }
             if (bound.min < extrema.min) {
                 extrema.min = bound.min;
-                extrema.t_min = section_start + bound.t_min;
+                extrema.t_min = std::clamp(section_start + bound.t_min, section_start, cumulative_times[section]);
             }
             if (bound.max > extrema.max) {
                 extrema.max = bound.max;
-                extrema.t_max = section_start + bound.t_max;
+                extrema.t_max = std::clamp(section_start + bound.t_max, section_start, cumulative_times[section]);
             }
             section_start = cumulative_times[section];
         }
@@ -334,8 +483,17 @@ public:
         if (positions.size() != times.size() || velocities.size() != times.size() || accelerations.size() != times.size()) {
             throw RuckigError("mismatch in number of samples (vector size).");
         }
-        for (size_t i = 0; i < times.size(); ++i) {
-            at_time(times[i], positions[i], velocities[i], accelerations[i]);
+        // Choose a preferred direction from this batch's endpoints. Mixed
+        // time order retains binary-search fallback, with no shared cursor.
+        bool reverse = false;
+        if (times.size() > 1) {
+            const double first = static_cast<double>(times[0]), last = static_cast<double>(times[times.size() - 1]);
+            reverse = std::isfinite(first) && std::isfinite(last) && last < first;
+        }
+        if (reverse) {
+            at_times_impl<true>(times, positions, velocities, accelerations);
+        } else {
+            at_times_impl<false>(times, positions, velocities, accelerations);
         }
     }
 
@@ -390,110 +548,245 @@ public:
     }
 
 private:
-    // Raw times only propose reference states; Ruckig revalidates every resulting chain.
-    template<bool enforce_time_bounds>
-    std::optional<double> get_first_time_at_position_impl(size_t dof, double position, double time_after=0.0) const {
-        if (!calculated || !has_valid_profile_structure() || dof >= degrees_of_freedom || !std::isfinite(position) || !std::isfinite(time_after) || (enforce_time_bounds && time_after > duration)) {
+    std::optional<double> get_first_time_at_position_bounded(size_t dof, double position, double time_after) const {
+        if (!calculated || !has_valid_profile_structure() || dof >= degrees_of_freedom
+            || !std::isfinite(position) || !std::isfinite(time_after) || time_after > duration) {
             return std::nullopt;
         }
         const auto profiles = profiles_view();
-        const auto cumulative_times = times_view();
-        const double earliest_time = std::max(0.0, time_after);
-        const auto bounded_candidate = [&](double candidate) -> std::optional<double> {
-            if (earliest_time <= candidate && candidate <= duration) {
-                return candidate;
+        const auto ends = times_view();
+        const double earliest = std::max(0.0, time_after);
+        const size_t first_section = earliest < duration ? std::upper_bound(ends.begin(), ends.end(), earliest) - ends.begin() : profiles.size();
+        size_t sampling_section = first_section;
+        const auto matches = [&](double time) {
+            return std::abs(position_at_time_for_dof(time, dof, sampling_section) - position) < 1e-9;
+        };
+        if (matches(earliest)) return earliest;
+        if (earliest == duration) return std::nullopt;
+
+        const auto query_step = [&](double section_start, double section_end, double pre, double begin, double end,
+            double p, double v, double a, double j) -> std::optional<double> {
+            if (!(begin < end)) return std::nullopt;
+            double lower = std::max(earliest, section_start + (pre + begin));
+            double upper = std::min(section_end, section_start + (pre + end));
+            if (j != 0.0 || a != 0.0) {
+                if (!sampling_step_time_bounds(section_start, section_end, pre, begin, end, lower, upper)) return std::nullopt;
+                lower = std::max(earliest, lower);
             }
-            if (std::isnan(candidate)) {
-                return std::nullopt;
+            if (upper < lower) return std::nullopt;
+            // Match the subtraction order used by time sampling. A section or
+            // phase boundary need not survive addition/subtraction exactly.
+            const auto local_time = [&](double time) { return ((time - section_start) - pre) - begin; };
+            const auto step_position = [&](double time) { return std::get<0>(integrate(local_time(time), p, v, a, j)); };
+            const auto consider_time = [&](double time) {
+                if (!(std::abs(step_position(time) - position) < 1e-9)) return false;
+                const double phase_time = (time - section_start) - pre;
+                // These are the sampler's exact section/phase inequalities.
+                // Only boundaries need another lookup to select the next phase.
+                return (section_start <= time && time < section_end && begin <= phase_time && phase_time < end) || matches(time);
+            };
+            // The requested lower bound already failed the sampler check.
+            if (lower != earliest && consider_time(lower)) return lower;
+            const auto root_time = [&](double root) {
+                const double time = section_start + (pre + (begin + root));
+                return std::isnan(time) ? time : std::clamp(time, lower, upper);
+            };
+            if (j == 0.0 && a == 0.0 && v != 0.0) {
+                const double candidate = root_time((position - p) / v);
+                if (std::isfinite(candidate) && consider_time(candidate)) return candidate;
             }
-            const double bounded_time = std::clamp(candidate, earliest_time, duration);
-            bool matches = false;
-            size_t section;
-            state_to_integrate_from(bounded_time, section, [&](size_t axis, double t, double p, double v, double a, double j) {
-                if (axis == dof) {
-                    matches = std::abs(std::get<0>(integrate(t, p, v, a, j)) - position) < 1e-9;
+            const auto nearby_match = [&](double time, double left, double right) -> std::optional<double> {
+                if (!std::isfinite(time)) return std::nullopt;
+                if (left <= time && time <= right && consider_time(time)) return time;
+                // Inverting a rounded polynomial and adding phase/section
+                // offsets can move a representable crossing by several ULPs.
+                double before = time, after = time;
+                for (size_t neighbor = 0; neighbor < 4; ++neighbor) {
+                    before = std::nextafter(before, -std::numeric_limits<double>::infinity());
+                    after = std::nextafter(after, std::numeric_limits<double>::infinity());
+                    if (left <= before && before <= right && consider_time(before)) return before;
+                    if (left <= after && after <= right && consider_time(after)) return after;
                 }
-            });
-            return matches ? std::optional<double>(bounded_time) : std::nullopt;
+                return std::nullopt;
+            };
+            if (j == 0.0 && a == 0.0) {
+                const auto find_linear = [&]() -> std::optional<double> {
+                    if (v != 0.0) {
+                        const double candidate = root_time((position - p) / v);
+                        if (auto match = nearby_match(candidate, lower, upper)) return match;
+                    }
+                    return consider_time(upper) ? std::optional<double>(upper) : std::nullopt;
+                };
+                if (auto match = find_linear()) return match;
+                // Most cruise queries finish above. Locate exact phase bounds
+                // only when a rounded boundary prevents that direct solution.
+                if (!sampling_step_time_bounds(section_start, section_end, pre, begin, end, lower, upper)) return std::nullopt;
+                lower = std::max(earliest, lower);
+                return upper < lower ? std::nullopt : find_linear();
+            }
+            // Search monotone pieces in time order. Conditioning alone cannot
+            // distinguish every near-multiple cubic root; a bracket also lets
+            // us refine a candidate against actual floating-point sampling.
+            const double time_scale = std::max(0.0, local_time(upper));
+            std::array<double, 4> boundaries {lower, upper};
+            size_t boundary_count = 2;
+            for (double turn: roots::solve_quadratic_scaled(j / 2, a, v, time_scale)) {
+                const double time = root_time(turn);
+                if (lower < time && time < upper) boundaries[boundary_count++] = time;
+            }
+            std::sort(boundaries.begin(), boundaries.begin() + boundary_count);
+            for (size_t part = 1; part < boundary_count; ++part) {
+                double left = boundaries[part - 1], right = boundaries[part];
+                const double p_left = std::get<0>(integrate(local_time(left), p, v, a, j));
+                const double p_right = std::get<0>(integrate(local_time(right), p, v, a, j));
+                const double minimum = std::min(p_left, p_right), maximum = std::max(p_left, p_right);
+                const bool within_range = minimum <= position && position <= maximum;
+                if (!within_range) {
+                    // Avoid searching neighboring times on unrelated phases.
+                    // Account for the nested polynomial's rounding near an
+                    // endpoint before rejecting its whole monotone support.
+                    const double t = std::max(std::abs(local_time(left)), std::abs(local_time(right)));
+                    const double tolerance = 1e-9 + 8 * std::numeric_limits<double>::epsilon()
+                        * (std::abs(p) + t * (std::abs(v) + t * (std::abs(a) / 2 + t * std::abs(j) / 6)));
+                    if ((position < minimum && minimum - position > tolerance) || (position > maximum && position - maximum > tolerance)) continue;
+                }
+                // Reuse the failed lower-endpoint check on the first piece.
+                if (left != lower && consider_time(left)) return left;
+                if (within_range) {
+                    std::optional<double> first;
+                    const auto try_roots = [&](auto candidates) {
+                        for (double root: candidates) {
+                            const double candidate = root_time(root);
+                            if (left <= candidate && candidate <= right && consider_time(candidate)) {
+                                if (!first || candidate < *first) first = candidate;
+                            } else if (auto match = nearby_match(candidate, left, right); match && (!first || *match < *first)) first = match;
+                        }
+                    };
+                    // Prefer conditioned roots for small/fast motion. The
+                    // unscaled fallback can retain a small crossing within an
+                    // enormous cloud phase whose full-interval scale loses it.
+                    try_roots(roots::solve_cubic_scaled(j / 6, a / 2, v, p - position, time_scale));
+                    if (!first) try_roots(roots::solve_cubic(j / 6, a / 2, v, p - position));
+                    if (first) return first;
+                    for (size_t iteration = 0; iteration < 80; ++iteration) {
+                        double middle = std::midpoint(left, right);
+                        if (middle == left || middle == right) break;
+                        // First narrow wide positive intervals in exponent
+                        // space; arithmetic halving can otherwise use every
+                        // iteration before reaching a crossing near zero.
+                        if (left == 0.0 || right / 2 > left) {
+                            constexpr int smallest_exponent = std::numeric_limits<double>::min_exponent - std::numeric_limits<double>::digits;
+                            const int left_exponent = left > 0.0 ? std::ilogb(left) : smallest_exponent;
+                            const int right_exponent = std::ilogb(right);
+                            if (right_exponent - left_exponent > 1) {
+                                middle = std::ldexp(1.0, (left_exponent + right_exponent) / 2);
+                            }
+                        }
+                        if (consider_time(middle)) return middle;
+                        const double p_middle = std::get<0>(integrate(local_time(middle), p, v, a, j));
+                        if ((p_left < p_right) == (p_middle < position)) left = middle;
+                        else right = middle;
+                    }
+                    if (auto match = nearby_match(left, boundaries[part - 1], boundaries[part])) return match;
+                    if (auto match = nearby_match(right, boundaries[part - 1], boundaries[part])) return match;
+                }
+                if (auto match = nearby_match(boundaries[part - 1], boundaries[part - 1], boundaries[part])) return match;
+                if (auto match = nearby_match(boundaries[part], boundaries[part - 1], boundaries[part])) return match;
+            }
+            return std::nullopt;
         };
 
-        const auto find_in_step = [&](double start, double duration, double p, double v, double a, double j, double earliest) -> std::optional<double> {
-            if (std::abs(std::get<0>(integrate(earliest, p, v, a, j)) - position) < 1e-9) {
-                return start + earliest;
-            }
-            std::optional<double> first;
-            for (double t: roots::solve_cubic(j / 6, a / 2, v, p - position)) {
-                if (earliest <= t && t <= duration && (!first || t < *first)) {
-                    first = t;
-                }
-            }
-            if (!first && std::abs(std::get<0>(integrate(duration, p, v, a, j)) - position) < 1e-9) {
-                first = duration;
-            }
-            return first ? std::optional<double>(start + *first) : std::nullopt;
-        };
-        const auto retry_bounded_step = [&](double candidate, double start, double duration, double p, double v, double a, double j, double earliest) -> std::optional<double> {
-            if (auto bounded = bounded_candidate(candidate)) {
-                return bounded;
-            }
-            std::optional<double> first;
-            for (double t: roots::solve_cubic(j / 6, a / 2, v, p - position)) {
-                if (earliest <= t && t <= duration) {
-                    const double global_time = start + t;
-                    auto bounded = earliest_time <= global_time && global_time <= this->duration
-                        ? std::optional<double>(global_time) : bounded_candidate(global_time);
-                    if (bounded && (!first || *bounded < *first)) {
-                        first = bounded;
-                    }
-                }
-            }
-            if (!first && std::abs(std::get<0>(integrate(duration, p, v, a, j)) - position) < 1e-9) {
-                return bounded_candidate(start + duration);
-            }
-            return first;
-        };
-        for (size_t i = 0; i < profiles.size(); ++i) {
-            const double section_time = (i > 0) ? cumulative_times[i-1] : 0.0;
+        // Only sections at/after the lower bound participate in sampling. This
+        // skips old sections in logarithmic time, including repeated ends.
+        for (size_t i = first_section; i < profiles.size(); ++i) {
+            sampling_section = i;
+            const double start = i == 0 ? 0.0 : ends[i - 1];
+            const double end = ends[i];
             const auto& profile = profiles[i][dof];
-            double start = section_time;
-            if (profile.brake.duration > 0.0) {
-                for (size_t step = 0; step < 2; ++step) {
-                    if (profile.brake.t[step] > 0.0) {
-                        const double earliest = std::max(0.0, time_after - start);
-                        if (!(earliest > profile.brake.t[step])) {
-                            if (auto time = find_in_step(start, profile.brake.t[step], profile.brake.p[step], profile.brake.v[step], profile.brake.a[step], profile.brake.j[step], earliest)) {
-                                if (!enforce_time_bounds || (earliest_time <= *time && *time <= duration)) return time;
-                                if (auto bounded = retry_bounded_step(*time, start, profile.brake.t[step], profile.brake.p[step], profile.brake.v[step], profile.brake.a[step], profile.brake.j[step], earliest)) return bounded;
-                            }
-                        }
-                        start += profile.brake.t[step];
-                    }
+            std::optional<double> crossing;
+            visit_sampling_steps(profile, end - start, [&](double pre, double begin, double finish, double p, double v, double a, double j) {
+                if (!(begin < finish)) return false;
+                if (j == 0.0 && a == 0.0) {
+                    // Keep disjoint cruise supports outside the root-search
+                    // call, so long chains skip them without its call frame.
+                    const double p_end = std::get<0>(integrate(finish - begin, p, v, a, j));
+                    const double minimum = std::min(p, p_end), maximum = std::max(p, p_end);
+                    if ((position < minimum && minimum - position >= 1e-9) || (position > maximum && position - maximum >= 1e-9)) return false;
                 }
-            }
-            if (profile.t_sum.back() > 0.0) {
-                for (size_t step = 0; step < 7; ++step) {
-                    if (profile.t[step] > 0.0) {
-                        const double earliest = std::max(0.0, time_after - start);
-                        if (!(earliest > profile.t[step])) {
-                            if (auto time = find_in_step(start, profile.t[step], profile.p[step], profile.v[step], profile.a[step], profile.j[step], earliest)) {
-                                if (!enforce_time_bounds || (earliest_time <= *time && *time <= duration)) return time;
-                                if (auto bounded = retry_bounded_step(*time, start, profile.t[step], profile.p[step], profile.v[step], profile.a[step], profile.j[step], earliest)) return bounded;
-                            }
-                        }
-                        start += profile.t[step];
-                    }
-                }
-            }
-            const double tail_duration = std::max(0.0, cumulative_times[i] - start);
-            const double earliest = std::max(0.0, time_after - start);
-            if (!(earliest > tail_duration)) {
-                if (auto time = find_in_step(start, tail_duration, profile.p.back(), profile.v.back(), profile.a.back(), 0.0, earliest)) {
-                    if (!enforce_time_bounds || (earliest_time <= *time && *time <= duration)) return time;
-                    if (auto bounded = retry_bounded_step(*time, start, tail_duration, profile.p.back(), profile.v.back(), profile.a.back(), 0.0, earliest)) return bounded;
-                }
-            }
+                crossing = query_step(start, end, pre, begin, finish, p, v, a, j);
+                return crossing.has_value();
+            });
+            if (crossing) return crossing;
         }
-        return std::nullopt;
+        return matches(duration) ? std::optional<double>(duration) : std::nullopt;
+    }
+
+    // Raw times only propose reference states; Ruckig revalidates every resulting chain.
+    template<bool enforce_time_bounds>
+    std::optional<double> get_first_time_at_position_impl(size_t dof, double position, double time_after=0.0) const {
+        if constexpr (enforce_time_bounds) {
+            return get_first_time_at_position_bounded(dof, position, time_after);
+        } else {
+            if (!calculated || !has_valid_profile_structure() || dof >= degrees_of_freedom || !std::isfinite(position) || !std::isfinite(time_after)) {
+                return std::nullopt;
+            }
+            const auto profiles = profiles_view();
+            const auto cumulative_times = times_view();
+            const auto find_in_step = [&](double start, double duration, double p, double v, double a, double j, double earliest) -> std::optional<double> {
+                if (std::abs(std::get<0>(integrate(earliest, p, v, a, j)) - position) < 1e-9) {
+                    return start + earliest;
+                }
+                std::optional<double> first;
+                for (double t: roots::solve_cubic(j / 6, a / 2, v, p - position)) {
+                    if (earliest <= t && t <= duration && (!first || t < *first)) {
+                        first = t;
+                    }
+                }
+                if (!first && std::abs(std::get<0>(integrate(duration, p, v, a, j)) - position) < 1e-9) {
+                    first = duration;
+                }
+                return first ? std::optional<double>(start + *first) : std::nullopt;
+            };
+            for (size_t i = 0; i < profiles.size(); ++i) {
+                const double section_time = (i > 0) ? cumulative_times[i-1] : 0.0;
+                const auto& profile = profiles[i][dof];
+                double start = section_time;
+                if (profile.brake.duration > 0.0) {
+                    for (size_t step = 0; step < 2; ++step) {
+                        if (profile.brake.t[step] > 0.0) {
+                            const double earliest = std::max(0.0, time_after - start);
+                            if (!(earliest > profile.brake.t[step])) {
+                                if (auto time = find_in_step(start, profile.brake.t[step], profile.brake.p[step], profile.brake.v[step], profile.brake.a[step], profile.brake.j[step], earliest)) {
+                                    return time;
+                                }
+                            }
+                            start += profile.brake.t[step];
+                        }
+                    }
+                }
+                if (profile.t_sum.back() > 0.0) {
+                    for (size_t step = 0; step < 7; ++step) {
+                        if (profile.t[step] > 0.0) {
+                            const double earliest = std::max(0.0, time_after - start);
+                            if (!(earliest > profile.t[step])) {
+                                if (auto time = find_in_step(start, profile.t[step], profile.p[step], profile.v[step], profile.a[step], profile.j[step], earliest)) {
+                                    return time;
+                                }
+                            }
+                            start += profile.t[step];
+                        }
+                    }
+                }
+                const double tail_duration = std::max(0.0, cumulative_times[i] - start);
+                const double earliest = std::max(0.0, time_after - start);
+                if (!(earliest > tail_duration)) {
+                    if (auto time = find_in_step(start, tail_duration, profile.p.back(), profile.v.back(), profile.a.back(), 0.0, earliest)) {
+                        return time;
+                    }
+                }
+            }
+            return std::nullopt;
+        }
     }
 
 public:

@@ -27,10 +27,15 @@ class WrapperRegressionTest(unittest.TestCase):
         otg, trajectory = Ruckig(1), Trajectory(1)
         self.assertEqual(otg.calculate(self.input, trajectory), Result.Working)
         self.assertGreater(trajectory.independent_min_durations[0], 0.0)
+        self.input.current_position = [10.0]
+        self.input.current_velocity = [2.0]
+        self.input.current_acceleration = [0.5]
         self.input.enabled = [False]
         self.assertEqual(otg.calculate(self.input, trajectory), Result.Working)
         self.assertEqual(trajectory.independent_min_durations, [0.0])
         self.assertEqual(trajectory.duration, 0.0)
+        for time, position, velocity in [(-2.0, 7.0, 1.0), (-0.5, 9.0625, 1.75), (0.5, 11.0625, 2.25)]:
+            self.assertEqual(trajectory.at_time(time), ([position], [velocity], [0.5]))
 
     def test_pass_to_input_removes_all_crossed_local_waypoints(self):
         self.input.target_position = [4.0]
@@ -62,6 +67,55 @@ class WrapperRegressionTest(unittest.TestCase):
         for i, time in enumerate(times):
             self.assertEqual((positions[i], velocities[i], accelerations[i]), trajectory.at_time(time))
         self.assertEqual(trajectory.at_times([]), ([], [], []))
+
+    def test_batch_sampling_handles_repeated_sections_and_arbitrary_time_order(self):
+        self.input.target_position = [3.0]
+        self.input.intermediate_positions = [[0.0], [1.0], [1.0], [2.0], [3.0]]
+        trajectory = Trajectory(1)
+        self.assertEqual(Ruckig(1).calculate_waypoints(self.input, trajectory), Result.Working)
+        times = [-1.0, 0.0, trajectory.duration + 1.0]
+        for end in trajectory.intermediate_durations:
+            times.extend([math.nextafter(end, -math.inf), end, end, math.nextafter(end, math.inf)])
+        times.sort()
+        orders = [times, list(reversed(times)), times[::2] + times[1::2]]
+        for order in orders:
+            p, v, a = trajectory.at_times(order)
+            for i, time in enumerate(order):
+                self.assertEqual((p[i], v[i], a[i]), trajectory.at_time(time))
+
+    def test_position_queries_keep_small_and_fast_cubic_motion(self):
+        otg, trajectory = Ruckig(1), Trajectory(1)
+        for target, velocity, acceleration, jerk in [(1e-7, 1.0, 1.0, 1e-17), (0.01, 1.0, 100.0, 1e4)]:
+            self.input.target_position = [target]
+            self.input.max_velocity = [velocity]
+            self.input.max_acceleration = [acceleration]
+            self.input.max_jerk = [jerk]
+            self.assertEqual(otg.calculate(self.input, trajectory), Result.Working)
+            for fraction in (0.2, 0.4, 0.6, 0.8):
+                time = trajectory.duration * fraction
+                position = trajectory.at_time(time)[0][0]
+                crossing = trajectory.get_first_time_at_position(0, position, time * 0.5)
+                self.assertIsNotNone(crossing)
+                self.assertGreaterEqual(crossing, time * 0.5)
+                self.assertLessEqual(crossing, trajectory.duration)
+                self.assertLess(abs(trajectory.at_time(crossing)[0][0] - position), 1e-9)
+
+    def test_small_discriminant_turning_point_enforces_position_bounds(self):
+        self.input.current_velocity = [-1e-10]
+        self.input.target_position = [-2.4e-7]
+        self.input.target_velocity = [8e-11]
+        self.input.target_acceleration = [6e-14]
+        self.input.max_velocity = [1e-8]
+        self.input.max_acceleration = [1e-10]
+        self.input.max_jerk = [1e-17]
+        otg, trajectory = Ruckig(1), Trajectory(1)
+        self.assertEqual(otg.calculate(self.input, trajectory), Result.Working)
+        extrema = trajectory.position_extrema[0]
+        self.assertLess(extrema.min, -2.9e-7)
+        self.assertAlmostEqual(extrema.t_min, math.sqrt(2e7), places=7)
+        self.input.min_position = [-2.7e-7]
+        self.assertEqual(otg.calculate(self.input, trajectory), Result.ErrorPositionalLimits)
+        self.assertLess(trajectory.position_extrema[0].min, self.input.min_position[0])
 
     def test_profile_metadata_enums(self):
         otg, trajectory = Ruckig(1), Trajectory(1)
